@@ -38,12 +38,14 @@ import com.maou.apptemplateapi.module.ticket.entity.RepairAssignment;
 import com.maou.apptemplateapi.module.ticket.entity.RepairEvaluation;
 import com.maou.apptemplateapi.module.ticket.entity.RepairTicket;
 import com.maou.apptemplateapi.module.ticket.entity.RepairTicketFlow;
+import com.maou.apptemplateapi.module.ticket.enums.TicketAction;
 import com.maou.apptemplateapi.module.ticket.enums.TicketPriority;
 import com.maou.apptemplateapi.module.ticket.enums.TicketStatus;
 import com.maou.apptemplateapi.module.ticket.mapper.RepairAssignmentMapper;
 import com.maou.apptemplateapi.module.ticket.mapper.RepairEvaluationMapper;
 import com.maou.apptemplateapi.module.ticket.mapper.RepairTicketFlowMapper;
 import com.maou.apptemplateapi.module.ticket.mapper.RepairTicketMapper;
+import com.maou.apptemplateapi.module.ticket.state.TicketStateMachine;
 import com.maou.apptemplateapi.module.user.entity.UserAccount;
 import com.maou.apptemplateapi.module.user.mapper.UserAccountMapper;
 import lombok.RequiredArgsConstructor;
@@ -58,7 +60,6 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -109,7 +110,7 @@ public class TicketService {
             replaceReportImages(ticket, request.reportImageFileIds(), currentUser);
             updateTicketOrFail(ticket, "student-create-ticket-bind-report-images");
         }
-        addFlow(ticket.getId(), null, TicketStatus.PENDING_REVIEW, currentUser, "CREATE", "学生提交报修");
+        addFlow(ticket.getId(), null, TicketStatus.PENDING_REVIEW, currentUser, TicketAction.CREATE, "学生提交报修");
         triggerAiPreAnalysisAfterCommit(ticket.getId(), currentUser.getId(), "student-create-ticket-ai-pre-analysis");
         return detailForStudent(ticket.getId());
     }
@@ -157,7 +158,7 @@ public class TicketService {
         evaluation.setContent(request.content());
         evaluationMapper.insert(evaluation);
 
-        transition(ticket, TicketStatus.COMPLETED, currentUser, "EVALUATE", "学生评价完成");
+        transition(ticket, TicketStatus.COMPLETED, currentUser, TicketAction.EVALUATE, "学生评价完成");
         return toDetail(getTicket(ticketId));
     }
 
@@ -171,7 +172,7 @@ public class TicketService {
             throw new BusinessException(ErrorCode.TICKET_ACCESS_DENIED);
         }
         requireStatus(ticket, TicketStatus.WAITING_CONFIRM, "student-ticket-rework");
-        transition(ticket, TicketStatus.PROCESSING, currentUser, "REQUEST_REWORK", request.reason());
+        transition(ticket, TicketStatus.PROCESSING, currentUser, TicketAction.REQUEST_REWORK, request.reason());
         return toDetail(getTicket(ticketId));
     }
 
@@ -200,7 +201,7 @@ public class TicketService {
         if (request.reportImageFileIds() != null) {
             replaceReportImages(ticket, request.reportImageFileIds(), currentUser);
         }
-        transition(ticket, TicketStatus.PENDING_REVIEW, currentUser, "RESUBMIT", "学生修改后重新提交");
+        transition(ticket, TicketStatus.PENDING_REVIEW, currentUser, TicketAction.RESUBMIT, "学生修改后重新提交");
         triggerAiPreAnalysisAfterCommit(ticket.getId(), currentUser.getId(), "student-resubmit-ticket-ai-pre-analysis");
         return toDetail(getTicket(ticketId));
     }
@@ -238,7 +239,7 @@ public class TicketService {
         CurrentUser currentUser = requireRole(UserRole.ADMIN, "admin-ticket-urge", ticketId);
         RepairTicket ticket = getTicket(ticketId);
         TicketStatus currentStatus = parseStatus(ticket.getStatus(), "admin-ticket-urge");
-        if (!Set.of(TicketStatus.ASSIGNED, TicketStatus.PROCESSING, TicketStatus.WAITING_CONFIRM).contains(currentStatus)) {
+        if (!TicketStateMachine.isUrgeable(currentStatus)) {
             log.warn("ticket urge status invalid, scenario=admin-ticket-urge, ticketId={}, currentStatus={}, adminId={}, studentId={}, workerId={}",
                     ticketId, ticket.getStatus(), currentUser.getId(), ticket.getStudentId(), ticket.getAssignedWorkerId());
             throw new BusinessException(ErrorCode.TICKET_STATUS_INVALID);
@@ -247,8 +248,8 @@ public class TicketService {
         ticket.setUrgedBy(currentUser.getId());
         ticket.setUrgeRemark(request.remark());
         ticketMapper.updateById(ticket);
-        addFlow(ticketId, ticket.getStatus(), currentStatus, currentUser, "URGE", request.remark());
-        operationAuditService.record(currentUser, "REPAIR_TICKET", ticketId, "URGE",
+        addFlow(ticketId, ticket.getStatus(), currentStatus, currentUser, TicketAction.URGE, request.remark());
+        operationAuditService.record(currentUser, "REPAIR_TICKET", ticketId, TicketAction.URGE.name(),
                 ticketSnapshot(ticket, currentStatus.name()), ticketSnapshot(ticket, currentStatus.name()), request.remark());
         return toDetail(getTicket(ticketId));
     }
@@ -257,7 +258,7 @@ public class TicketService {
     public TicketDetailResponse assign(Long ticketId, TicketAssignRequest request) {
         CurrentUser currentUser = requireRole(UserRole.ADMIN, "admin-ticket-assign", ticketId);
         RepairTicket ticket = getTicket(ticketId);
-        requireAnyStatus(ticket, "admin-ticket-assign", TicketStatus.PENDING_REVIEW, TicketStatus.RETURNED);
+        requireActionAllowed(ticket, "admin-ticket-assign", TicketAction.ASSIGN);
         ensureBaseData(request.categoryId(), ticket.getLocationId());
         UserAccount worker = getEnabledWorker(request.workerId(), "admin-ticket-assign", ticketId);
 
@@ -269,7 +270,7 @@ public class TicketService {
         ticket.setAssignedAt(LocalDateTime.now());
         ticket.setReturnReason(null);
         ticket.setSlaDeadlineAt(defaultSlaDeadline(request.priority(), ticket.getAssignedAt()));
-        transition(ticket, TicketStatus.ASSIGNED, currentUser, "ASSIGN", request.remark());
+        transition(ticket, TicketStatus.ASSIGNED, currentUser, TicketAction.ASSIGN, request.remark());
 
         RepairAssignment assignment = new RepairAssignment();
         assignment.setTicketId(ticketId);
@@ -285,9 +286,9 @@ public class TicketService {
     public TicketDetailResponse reject(Long ticketId, TicketRejectRequest request) {
         CurrentUser currentUser = requireRole(UserRole.ADMIN, "admin-ticket-reject", ticketId);
         RepairTicket ticket = getTicket(ticketId);
-        requireAnyStatus(ticket, "admin-ticket-reject", TicketStatus.PENDING_REVIEW, TicketStatus.RETURNED);
+        requireActionAllowed(ticket, "admin-ticket-reject", TicketAction.REJECT);
         ticket.setRejectReason(request.reason());
-        transition(ticket, TicketStatus.REJECTED, currentUser, "REJECT", request.reason());
+        transition(ticket, TicketStatus.REJECTED, currentUser, TicketAction.REJECT, request.reason());
         return toDetail(getTicket(ticketId));
     }
 
@@ -388,7 +389,7 @@ public class TicketService {
         RepairTicket ticket = getTicket(ticketId);
         ensureAssignedToWorker(ticket, currentUser.getId(), "worker-ticket-accept");
         requireStatus(ticket, TicketStatus.ASSIGNED, "worker-ticket-accept");
-        transition(ticket, TicketStatus.PROCESSING, currentUser, "ACCEPT", "维修员接单并开始处理");
+        transition(ticket, TicketStatus.PROCESSING, currentUser, TicketAction.ACCEPT, "维修员接单并开始处理");
         return toDetail(getTicket(ticketId));
     }
 
@@ -402,7 +403,7 @@ public class TicketService {
         ticket.setAssignedWorkerId(null);
         ticket.setAssignedAdminId(null);
         ticket.setAssignedAt(null);
-        transition(ticket, TicketStatus.RETURNED, currentUser, "WORKER_RETURN", request.reason());
+        transition(ticket, TicketStatus.RETURNED, currentUser, TicketAction.WORKER_RETURN, request.reason());
         return toDetail(getTicket(ticketId));
     }
 
@@ -415,7 +416,7 @@ public class TicketService {
         ticket.setProcessResult(request.result());
         ticket.setProcessRemark(request.remark());
         ticket.setProcessedAt(LocalDateTime.now());
-        transition(ticket, TicketStatus.WAITING_CONFIRM, currentUser, "SUBMIT_RESULT", request.result());
+        transition(ticket, TicketStatus.WAITING_CONFIRM, currentUser, TicketAction.SUBMIT_RESULT, request.result());
         return toDetail(getTicket(ticketId));
     }
 
@@ -433,12 +434,12 @@ public class TicketService {
 
     private LambdaQueryWrapper<RepairTicket> applyQualityFilters(LambdaQueryWrapper<RepairTicket> wrapper, Boolean overdue, Boolean urged) {
         if (Boolean.TRUE.equals(overdue)) {
-            wrapper.notIn(RepairTicket::getStatus, TicketStatus.COMPLETED.name(), TicketStatus.REJECTED.name(), TicketStatus.RETURNED.name())
+            wrapper.in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames())
                     .isNotNull(RepairTicket::getSlaDeadlineAt)
                     .lt(RepairTicket::getSlaDeadlineAt, LocalDateTime.now());
         }
         if (Boolean.TRUE.equals(urged)) {
-            wrapper.notIn(RepairTicket::getStatus, TicketStatus.COMPLETED.name(), TicketStatus.REJECTED.name(), TicketStatus.RETURNED.name())
+            wrapper.in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames())
                     .isNotNull(RepairTicket::getUrgedAt);
         }
         return wrapper;
@@ -551,24 +552,24 @@ public class TicketService {
         return ticket;
     }
 
-    private void transition(RepairTicket ticket, TicketStatus toStatus, CurrentUser operator, String action, String remark) {
+    private void transition(RepairTicket ticket, TicketStatus toStatus, CurrentUser operator, TicketAction action, String remark) {
         String fromStatus = ticket.getStatus();
         ensureTransitionAllowed(ticket, toStatus, action);
         ticket.setStatus(toStatus.name());
         ticketMapper.updateById(ticket);
         addFlow(ticket.getId(), fromStatus, toStatus, operator, action, remark);
-        operationAuditService.record(operator, "REPAIR_TICKET", ticket.getId(), action,
+        operationAuditService.record(operator, "REPAIR_TICKET", ticket.getId(), action.name(),
                 ticketSnapshot(ticket, fromStatus), ticketSnapshot(ticket, toStatus.name()), remark);
     }
 
-    private void addFlow(Long ticketId, String fromStatus, TicketStatus toStatus, CurrentUser operator, String action, String remark) {
+    private void addFlow(Long ticketId, String fromStatus, TicketStatus toStatus, CurrentUser operator, TicketAction action, String remark) {
         RepairTicketFlow flow = new RepairTicketFlow();
         flow.setTicketId(ticketId);
         flow.setFromStatus(fromStatus);
         flow.setToStatus(toStatus.name());
         flow.setOperatorId(operator.getId());
         flow.setOperatorRole(operator.getRoleCode());
-        flow.setAction(action);
+        flow.setAction(action.name());
         flow.setRemark(remark);
         flowMapper.insert(flow);
     }
@@ -581,36 +582,25 @@ public class TicketService {
         }
     }
 
-    private void requireAnyStatus(RepairTicket ticket, String scenario, TicketStatus... allowedStatuses) {
+    private void requireActionAllowed(RepairTicket ticket, String scenario, TicketAction action) {
         TicketStatus current = parseStatus(ticket.getStatus(), scenario);
-        if (Set.of(allowedStatuses).contains(current)) {
+        if (TicketStateMachine.allowedFromStatuses(action).contains(current)) {
             return;
         }
-        log.warn("ticket status invalid, scenario={}, ticketId={}, currentStatus={}, allowedStatuses={}, studentId={}, workerId={}",
-                scenario, ticket.getId(), ticket.getStatus(), Set.of(allowedStatuses), ticket.getStudentId(), ticket.getAssignedWorkerId());
+        log.warn("ticket status invalid, scenario={}, ticketId={}, action={}, currentStatus={}, allowedStatuses={}, studentId={}, workerId={}",
+                scenario, ticket.getId(), action.name(), ticket.getStatus(), TicketStateMachine.allowedFromStatuses(action),
+                ticket.getStudentId(), ticket.getAssignedWorkerId());
         throw new BusinessException(ErrorCode.TICKET_STATUS_INVALID);
     }
 
-    private void ensureTransitionAllowed(RepairTicket ticket, TicketStatus toStatus, String action) {
+    private void ensureTransitionAllowed(RepairTicket ticket, TicketStatus toStatus, TicketAction action) {
         String fromStatus = ticket.getStatus();
-        if (fromStatus == null) {
+        if (TicketStateMachine.canTransition(fromStatus == null ? null : parseStatus(fromStatus, "ticket-state-machine"), toStatus, action)) {
             return;
         }
-        TicketStatus from = parseStatus(fromStatus, "ticket-state-machine");
-        boolean allowed = switch (from) {
-            case PENDING_REVIEW -> Set.of(TicketStatus.ASSIGNED, TicketStatus.REJECTED).contains(toStatus);
-            case ASSIGNED -> Set.of(TicketStatus.PROCESSING, TicketStatus.RETURNED).contains(toStatus);
-            case PROCESSING -> toStatus == TicketStatus.WAITING_CONFIRM;
-            case WAITING_CONFIRM -> Set.of(TicketStatus.COMPLETED, TicketStatus.PROCESSING).contains(toStatus);
-            case RETURNED -> Set.of(TicketStatus.ASSIGNED, TicketStatus.REJECTED).contains(toStatus);
-            case REJECTED -> toStatus == TicketStatus.PENDING_REVIEW;
-            case COMPLETED -> false;
-        };
-        if (!allowed) {
-            log.warn("ticket transition denied, scenario=ticket-state-machine, ticketId={}, action={}, fromStatus={}, toStatus={}, studentId={}, workerId={}",
-                    ticket.getId(), action, fromStatus, toStatus.name(), ticket.getStudentId(), ticket.getAssignedWorkerId());
-            throw new BusinessException(ErrorCode.TICKET_STATUS_INVALID);
-        }
+        log.warn("ticket transition denied, scenario=ticket-state-machine, ticketId={}, action={}, fromStatus={}, toStatus={}, studentId={}, workerId={}",
+                ticket.getId(), action.name(), fromStatus, toStatus.name(), ticket.getStudentId(), ticket.getAssignedWorkerId());
+        throw new BusinessException(ErrorCode.TICKET_STATUS_INVALID);
     }
 
     private TicketStatus parseStatus(String status, String scenario) {
@@ -668,7 +658,7 @@ public class TicketService {
 
     private LambdaQueryWrapper<RepairTicket> activeTicketWrapper() {
         return new LambdaQueryWrapper<RepairTicket>()
-                .notIn(RepairTicket::getStatus, TicketStatus.COMPLETED.name(), TicketStatus.REJECTED.name(), TicketStatus.RETURNED.name());
+                .in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames());
     }
 
     private LocalDateTime defaultSlaDeadline(TicketPriority priority, LocalDateTime baseTime) {
@@ -697,7 +687,7 @@ public class TicketService {
         if (ticket.getSlaDeadlineAt() == null) {
             return false;
         }
-        if (Set.of(TicketStatus.COMPLETED.name(), TicketStatus.REJECTED.name()).contains(ticket.getStatus())) {
+        if (!TicketStateMachine.isActive(parseStatus(ticket.getStatus(), "ticket-sla-overdue"))) {
             return false;
         }
         return ticket.getSlaDeadlineAt().isBefore(LocalDateTime.now());
