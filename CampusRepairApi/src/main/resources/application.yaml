@@ -1,0 +1,141 @@
+﻿server:
+  port: 8999
+
+spring:
+  application:
+    name: campus-repair-api
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${APP_DB_URL:jdbc:mysql://127.0.0.1:3306/campus_repair?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai}
+    username: ${APP_DB_USERNAME:root}
+    password: ${APP_DB_PASSWORD:1829002}
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: assign_id
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+knife4j:
+  enable: true
+  setting:
+    language: ZH_CN
+    enable-swagger-models: true
+    enable-dynamic-parameter: false
+    footer-custom-content: "<strong>Campus Repair API</strong>"
+    enable-footer-custom: true
+    enable-footer: true
+    enable-document-manage: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+app:
+  ai:
+    ark:
+      enabled: ${APP_AI_ENABLED:true}
+      fail-fast: ${APP_AI_FAIL_FAST:false}
+      base-url: ${APP_AI_BASE_URL:https://ark.cn-beijing.volces.com/api/v3}
+      api-key: ${APP_AI_API_KEY:90be7f6f-9930-449b-8577-edcaf91911a5}
+      model-name: ${APP_AI_MODEL:doubao-seed-2-0-lite-260428}
+      timeout-seconds: ${APP_AI_TIMEOUT_SECONDS:120}
+      temperature: ${APP_AI_TEMPERATURE:0.7}
+      pending-timeout-seconds: ${APP_AI_PENDING_TIMEOUT_SECONDS:300}
+      max-prompt-chars: ${APP_AI_MAX_PROMPT_CHARS:12000}
+      max-image-count: ${APP_AI_MAX_IMAGE_COUNT:3}
+      max-image-size-bytes: ${APP_AI_MAX_IMAGE_SIZE_BYTES:5242880}
+      max-image-total-bytes: ${APP_AI_MAX_IMAGE_TOTAL_BYTES:10485760}
+      image-transfer-mode: ${APP_AI_IMAGE_TRANSFER_MODE:BASE64}
+  agent:
+    bocha:
+      web-search:
+        enabled: ${APP_AGENT_WEB_SEARCH_ENABLED:false}
+        base-url: ${APP_AGENT_WEB_SEARCH_BASE_URL:https://api.bocha.cn/v1/web-search}
+        api-key: ${APP_AGENT_WEB_SEARCH_API_KEY:}
+        timeout-seconds: ${APP_AGENT_WEB_SEARCH_TIMEOUT_SECONDS:20}
+        freshness: ${APP_AGENT_WEB_SEARCH_FRESHNESS:noLimit}
+        summary: ${APP_AGENT_WEB_SEARCH_SUMMARY:true}
+        count: ${APP_AGENT_WEB_SEARCH_COUNT:5}
+        include: ${APP_AGENT_WEB_SEARCH_INCLUDE:}
+        exclude: ${APP_AGENT_WEB_SEARCH_EXCLUDE:}
+      rerank:
+        enabled: ${APP_AGENT_RERANK_ENABLED:true}
+        base-url: ${APP_AGENT_RERANK_BASE_URL:https://api.bocha.cn/v1/rerank}
+        api-key: ${APP_AGENT_RERANK_API_KEY:}
+        timeout-seconds: ${APP_AGENT_RERANK_TIMEOUT_SECONDS:20}
+        model: ${APP_AGENT_RERANK_MODEL:gte-rerank}
+        top-n: ${APP_AGENT_RERANK_TOP_N:6}
+        return-documents: ${APP_AGENT_RERANK_RETURN_DOCUMENTS:true}
+    rag:
+      milvus:
+        enabled: ${APP_RAG_MILVUS_ENABLED:true}
+        uri: ${APP_RAG_MILVUS_URI:http://127.0.0.1:19530}
+        token: ${APP_RAG_MILVUS_TOKEN:}
+        timeout-seconds: ${APP_RAG_MILVUS_TIMEOUT_SECONDS:20}
+        collection-name: ${APP_RAG_MILVUS_COLLECTION:campus_repair_knowledge}
+        vector-field: ${APP_RAG_MILVUS_VECTOR_FIELD:vector}
+        # Must match the embedding model dimension. Changing this requires rebuilding the Milvus collection.
+        # Volcengine Ark text embedding models commonly use 2048; some models support 512/1024/2048.
+        dimension: ${APP_RAG_EMBEDDING_DIMENSION:2560}
+        # If an existing collection has a different vector dimension, drop it and let LangChain4j recreate it.
+        # Available values: true, false. Keep false in production if you do not want automatic data deletion.
+        recreate-on-dimension-mismatch: ${APP_RAG_MILVUS_RECREATE_ON_DIMENSION_MISMATCH:true}
+        top-k: ${APP_RAG_MILVUS_TOP_K:5}
+        chunk-size: ${APP_RAG_CHUNK_SIZE:800}
+        chunk-overlap: ${APP_RAG_CHUNK_OVERLAP:120}
+        max-chunks-per-document: ${APP_RAG_MAX_CHUNKS_PER_DOCUMENT:30}
+      embedding:
+        # Available values:
+        #   ARK_OPENAI: Volcengine Ark OpenAI-compatible embeddings, recommended for real RAG.
+        #   OPENAI_COMPATIBLE: Other OpenAI-compatible embedding providers.
+        #   LOCAL_HASH: Local deterministic hash vectors for offline development only.
+        provider: ${APP_RAG_EMBEDDING_PROVIDER:ARK_OPENAI}
+        # Volcengine Ark embeddings endpoint.
+        base-url: ${APP_RAG_EMBEDDING_BASE_URL:https://ark.cn-beijing.volces.com/api/v3}
+        api-key: ${APP_RAG_EMBEDDING_API_KEY:90be7f6f-9930-449b-8577-edcaf91911a5}
+        # Fill in the Ark embedding Model ID or Endpoint ID, for example your doubao embedding endpoint id.
+        model: ${APP_RAG_EMBEDDING_MODEL:doubao-embedding-text-240715}
+        timeout-seconds: ${APP_RAG_EMBEDDING_TIMEOUT_SECONDS:180}
+  security:
+    jwt:
+      secret: ${APP_JWT_SECRET:change-this-campus-repair-secret-to-a-secure-value}
+      issuer: ${APP_JWT_ISSUER:campus-repair}
+      expiration-seconds: ${APP_JWT_EXPIRATION_SECONDS:7200}
+  storage:
+    base-path: ${APP_STORAGE_BASE_PATH:campus-repair}
+    preview-expire-minutes: ${APP_STORAGE_PREVIEW_EXPIRE_MINUTES:30}
+    rustfs:
+      endpoint: ${APP_STORAGE_S3_ENDPOINT:http://127.0.0.1:9990}
+      access-key: ${APP_STORAGE_S3_ACCESS_KEY:rustfsadmin}
+      secret-key: ${APP_STORAGE_S3_SECRET_KEY:rustfsadmin}
+      bucket: ${APP_STORAGE_S3_BUCKET:campus-repair}
+      region: ${APP_STORAGE_S3_REGION:us-east-1}
+      force-path-style: ${APP_STORAGE_S3_FORCE_PATH_STYLE:true}
+  file:
+    max-size: ${APP_FILE_MAX_SIZE:10485760}
+    allowed-content-types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      - audio/mpeg
+      - audio/wav
+      - audio/mp4
+      - audio/webm
+      - audio/aac
+      - audio/ogg
+      - application/pdf
+      - text/plain
+    temp-expire-hours: ${APP_FILE_TEMP_EXPIRE_HOURS:24}
+    cleanup-cron: ${APP_FILE_CLEANUP_CRON:0 0 * * * *}

@@ -1,0 +1,272 @@
+package com.maou.apptemplateapi.module.rag.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.maou.apptemplateapi.common.config.ai.AgentToolProperties;
+import com.maou.apptemplateapi.common.enums.UserRole;
+import com.maou.apptemplateapi.common.exception.BusinessException;
+import com.maou.apptemplateapi.common.exception.ErrorCode;
+import com.maou.apptemplateapi.common.result.PageResult;
+import com.maou.apptemplateapi.common.security.CurrentUser;
+import com.maou.apptemplateapi.common.security.CurrentUserProvider;
+import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentRequest;
+import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentResponse;
+import com.maou.apptemplateapi.module.rag.dto.RagChunkResponse;
+import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeChunk;
+import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeDocument;
+import com.maou.apptemplateapi.module.rag.mapper.RagKnowledgeChunkMapper;
+import com.maou.apptemplateapi.module.rag.mapper.RagKnowledgeDocumentMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
+
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class RagKnowledgeService {
+
+    private final RagKnowledgeDocumentMapper documentMapper;
+    private final RagKnowledgeChunkMapper chunkMapper;
+    private final AgentToolProperties agentToolProperties;
+    private final MilvusRagVectorService milvusRagVectorService;
+    private final RagRerankService ragRerankService;
+    private final RagEmbeddingService ragEmbeddingService;
+
+    public PageResult<KnowledgeDocumentResponse> listDocuments(long page, long size) {
+        requireAdmin("admin-list-rag-documents");
+        Page<RagKnowledgeDocument> result = documentMapper.selectPage(new Page<>(Math.max(page, 1), Math.min(Math.max(size, 1), 100)),
+                new LambdaQueryWrapper<RagKnowledgeDocument>()
+                        .eq(RagKnowledgeDocument::getDeleted, 0)
+                        .orderByDesc(RagKnowledgeDocument::getId));
+        Map<Long, Long> chunkCounts = countChunks(result.getRecords().stream().map(RagKnowledgeDocument::getId).toList());
+        return PageResult.of(result.getRecords().stream().map(doc -> toResponse(doc, chunkCounts.getOrDefault(doc.getId(), 0L).intValue())).toList(),
+                result.getCurrent(), result.getSize(), result.getTotal());
+    }
+
+    @Transactional
+    public KnowledgeDocumentResponse createDocument(KnowledgeDocumentRequest request) {
+        CurrentUser admin = requireAdmin("admin-create-rag-document");
+        RagKnowledgeDocument document = new RagKnowledgeDocument();
+        apply(document, request);
+        document.setCreatedBy(admin.getId());
+        documentMapper.insert(document);
+        rebuildChunks(document, "admin-create-rag-document");
+        return toResponse(documentMapper.selectById(document.getId()), countChunks(List.of(document.getId())).getOrDefault(document.getId(), 0L).intValue());
+    }
+
+    @Transactional
+    public KnowledgeDocumentResponse updateDocument(Long id, KnowledgeDocumentRequest request) {
+        requireAdmin("admin-update-rag-document");
+        RagKnowledgeDocument document = requireDocument(id, "admin-update-rag-document");
+        apply(document, request);
+        documentMapper.updateById(document);
+        rebuildChunks(document, "admin-update-rag-document");
+        return toResponse(documentMapper.selectById(id), countChunks(List.of(id)).getOrDefault(id, 0L).intValue());
+    }
+
+    @Transactional
+    public void deleteDocument(Long id) {
+        requireAdmin("admin-delete-rag-document");
+        requireDocument(id, "admin-delete-rag-document");
+        documentMapper.deleteById(id);
+        int deletedChunks = chunkMapper.physicalDeleteByDocumentId(id);
+        log.info("rag document deleted, scenario=admin-delete-rag-document, documentId={}, deletedChunkCount={}", id, deletedChunks);
+    }
+
+    @Transactional
+    public int rebuildDocumentChunks(Long documentId) {
+        requireAdmin("admin-rebuild-rag-document");
+        RagKnowledgeDocument document = requireDocument(documentId, "admin-rebuild-rag-document");
+        return rebuildChunks(document, "admin-rebuild-rag-document");
+    }
+
+    private int rebuildChunks(RagKnowledgeDocument document, String scenario) {
+        Long documentId = document.getId();
+        int deletedChunks = chunkMapper.physicalDeleteByDocumentId(documentId);
+        List<String> chunks = splitText(document.getContent());
+        List<RagKnowledgeChunk> savedChunks = new java.util.ArrayList<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            RagKnowledgeChunk chunk = new RagKnowledgeChunk();
+            chunk.setDocumentId(documentId);
+            chunk.setChunkIndex(i);
+            chunk.setContent(chunks.get(i));
+            chunk.setTokenCount(Math.max(1, chunks.get(i).length() / 2));
+            chunk.setEmbeddingProvider("%s:%s".formatted(ragEmbeddingService.provider(), ragEmbeddingService.modelName()));
+            chunk.setVectorStoreStatus(milvusRagVectorService.enabled() ? "PENDING" : "DISABLED");
+            chunk.setEnabled(document.getEnabled());
+            chunkMapper.insert(chunk);
+            savedChunks.add(chunk);
+        }
+        boolean vectorSynced = milvusRagVectorService.rebuildDocument(documentId, savedChunks, scenario);
+        if (milvusRagVectorService.enabled()) {
+            for (RagKnowledgeChunk chunk : savedChunks) {
+                chunk.setVectorStoreStatus(vectorSynced ? "SYNCED" : "FAILED");
+                chunkMapper.updateById(chunk);
+            }
+        }
+        log.info("rag document rebuilt, scenario={}, documentId={}, chunkCount={}, milvusEnabled={}, collectionName={}, rerankEnabled={}",
+                scenario,
+                documentId, chunks.size(), agentToolProperties.getRag().getMilvus().isEnabled(),
+                agentToolProperties.getRag().getMilvus().getCollectionName(), agentToolProperties.getBocha().getRerank().isEnabled());
+        log.info("rag document chunks replaced, scenario={}, documentId={}, deletedChunkCount={}, insertedChunkCount={}",
+                scenario, documentId, deletedChunks, chunks.size());
+        return chunks.size();
+    }
+
+    public List<RagChunkResponse> search(Long categoryId, String query, int limit) {
+        List<RagKnowledgeDocument> documents = documentMapper.selectList(new LambdaQueryWrapper<RagKnowledgeDocument>()
+                .eq(RagKnowledgeDocument::getEnabled, 1)
+                .eq(RagKnowledgeDocument::getDeleted, 0)
+                .and(categoryId != null, wrapper -> wrapper.eq(RagKnowledgeDocument::getCategoryId, categoryId).or().isNull(RagKnowledgeDocument::getCategoryId)));
+        if (documents.isEmpty() || !StringUtils.hasText(query)) {
+            return List.of();
+        }
+        int requestedLimit = Math.max(limit, 1);
+        int searchLimit = Math.max(requestedLimit, agentToolProperties.getBocha().getRerank().getTopN() == null ? requestedLimit : agentToolProperties.getBocha().getRerank().getTopN());
+        Map<Long, RagKnowledgeDocument> docMap = documents.stream()
+                .collect(Collectors.toMap(RagKnowledgeDocument::getId, doc -> doc));
+        Set<Long> docIds = docMap.keySet();
+        List<RagChunkResponse> milvusMatches = milvusRagVectorService.search(query, searchLimit, "rag-search");
+        if (!milvusMatches.isEmpty()) {
+            List<RagChunkResponse> hydratedMatches = hydrateMilvusMatches(milvusMatches, docIds);
+            return ragRerankService.rerank(query, hydratedMatches, "rag-search-milvus")
+                    .stream()
+                    .limit(requestedLimit)
+                    .toList();
+        }
+        Set<String> keywords = tokenize(query);
+        return chunkMapper.selectList(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                        .in(RagKnowledgeChunk::getDocumentId, docIds)
+                        .eq(RagKnowledgeChunk::getEnabled, 1)
+                        .eq(RagKnowledgeChunk::getDeleted, 0))
+                .stream()
+                .map(chunk -> {
+                    double score = score(chunk.getContent(), keywords);
+                    RagKnowledgeDocument doc = docMap.get(chunk.getDocumentId());
+                    return new RagChunkResponse(chunk.getId(), chunk.getDocumentId(), doc == null ? null : doc.getTitle(), chunk.getContent(), score);
+                })
+                .filter(chunk -> chunk.score() > 0)
+                .sorted(Comparator.comparingDouble(RagChunkResponse::score).reversed())
+                .limit(searchLimit)
+                .collect(Collectors.collectingAndThen(Collectors.toList(), candidates ->
+                        ragRerankService.rerank(query, candidates, "rag-search-db").stream().limit(requestedLimit).toList()));
+    }
+
+    private List<RagChunkResponse> hydrateMilvusMatches(List<RagChunkResponse> matches, Set<Long> allowedDocumentIds) {
+        List<Long> chunkIds = matches.stream().map(RagChunkResponse::id).filter(Objects::nonNull).distinct().toList();
+        if (chunkIds.isEmpty()) {
+            return matches;
+        }
+        Map<Long, RagKnowledgeChunk> chunks = chunkMapper.selectBatchIds(chunkIds).stream()
+                .filter(chunk -> chunk.getDeleted() == 0 && chunk.getEnabled() == 1)
+                .filter(chunk -> allowedDocumentIds.contains(chunk.getDocumentId()))
+                .collect(Collectors.toMap(RagKnowledgeChunk::getId, chunk -> chunk));
+        Map<Long, RagKnowledgeDocument> documents = documentMapper.selectBatchIds(chunks.values().stream()
+                        .map(RagKnowledgeChunk::getDocumentId)
+                        .distinct()
+                        .toList())
+                .stream()
+                .collect(Collectors.toMap(RagKnowledgeDocument::getId, document -> document));
+        return matches.stream()
+                .map(match -> {
+                    RagKnowledgeChunk chunk = chunks.get(match.id());
+                    if (chunk == null) {
+                        return null;
+                    }
+                    RagKnowledgeDocument document = documents.get(chunk.getDocumentId());
+                    return new RagChunkResponse(chunk.getId(), chunk.getDocumentId(),
+                            document == null ? match.title() : document.getTitle(), chunk.getContent(), match.score());
+                })
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private CurrentUser requireAdmin(String scenario) {
+        CurrentUser currentUser = CurrentUserProvider.require();
+        if (currentUser.getRole() != UserRole.ADMIN) {
+            log.warn("rag role denied, scenario={}, userId={}, roleCode={}", scenario, currentUser.getId(), currentUser.getRoleCode());
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return currentUser;
+    }
+
+    private RagKnowledgeDocument requireDocument(Long id, String scenario) {
+        RagKnowledgeDocument document = documentMapper.selectById(id);
+        if (document == null || document.getDeleted() != 0) {
+            log.warn("rag document not found, scenario={}, documentId={}", scenario, id);
+            throw new BusinessException(ErrorCode.NOT_FOUND);
+        }
+        return document;
+    }
+
+    private void apply(RagKnowledgeDocument document, KnowledgeDocumentRequest request) {
+        document.setTitle(request.title());
+        document.setCategoryId(request.categoryId());
+        document.setContent(request.content());
+        document.setEnabled(request.enabled() != null && request.enabled() == 1 ? 1 : 0);
+    }
+
+    private List<String> splitText(String text) {
+        Integer configuredChunkSize = agentToolProperties.getRag().getMilvus().getChunkSize();
+        Integer configuredOverlap = agentToolProperties.getRag().getMilvus().getChunkOverlap();
+        int chunkSize = Math.max(configuredChunkSize == null ? 800 : configuredChunkSize, 200);
+        int overlap = Math.min(Math.max(configuredOverlap == null ? 120 : configuredOverlap, 0), chunkSize / 2);
+        if (text.length() <= chunkSize) {
+            return List.of(text);
+        }
+        java.util.ArrayList<String> chunks = new java.util.ArrayList<>();
+        int start = 0;
+        while (start < text.length()) {
+            int end = Math.min(start + chunkSize, text.length());
+            chunks.add(text.substring(start, end));
+            if (end == text.length()) {
+                break;
+            }
+            start = Math.max(end - overlap, start + 1);
+        }
+        return chunks;
+    }
+
+    private Set<String> tokenize(String query) {
+        Set<String> tokens = new HashSet<>();
+        Arrays.stream(query.toLowerCase().split("[\\s,.;，。；、]+"))
+                .filter(StringUtils::hasText)
+                .forEach(tokens::add);
+        for (int i = 0; i < query.length() - 1; i++) {
+            tokens.add(query.substring(i, i + 2).toLowerCase());
+        }
+        return tokens;
+    }
+
+    private double score(String content, Set<String> keywords) {
+        String normalized = content.toLowerCase();
+        return keywords.stream().filter(Objects::nonNull).filter(normalized::contains).count();
+    }
+
+    private Map<Long, Long> countChunks(List<Long> documentIds) {
+        if (documentIds.isEmpty()) {
+            return Map.of();
+        }
+        return chunkMapper.selectList(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                        .in(RagKnowledgeChunk::getDocumentId, documentIds)
+                        .eq(RagKnowledgeChunk::getDeleted, 0))
+                .stream()
+                .collect(Collectors.groupingBy(RagKnowledgeChunk::getDocumentId, Collectors.counting()));
+    }
+
+    private KnowledgeDocumentResponse toResponse(RagKnowledgeDocument document, int chunkCount) {
+        return new KnowledgeDocumentResponse(document.getId(), document.getTitle(), document.getCategoryId(),
+                document.getContent(), document.getEnabled(), chunkCount, document.getCreatedAt(), document.getUpdatedAt());
+    }
+}

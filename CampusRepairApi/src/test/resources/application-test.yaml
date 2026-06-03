@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    driver-class-name: org.h2.Driver
+    url: jdbc:h2:mem:campus_repair_test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+
+app:
+  ai:
+    ark:
+      enabled: false
+  security:
+    jwt:
+      secret: test-campus-repair-secret-should-be-long-enough
+      issuer: campus-repair-test
+      expiration-seconds: 7200
