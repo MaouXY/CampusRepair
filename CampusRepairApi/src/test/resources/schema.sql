@@ -1,3 +1,23 @@
+DROP TABLE IF EXISTS rag_eval_case_result;
+DROP TABLE IF EXISTS rag_eval_run;
+DROP TABLE IF EXISTS rag_eval_case;
+DROP TABLE IF EXISTS worker_dispatch_score_snapshot;
+DROP TABLE IF EXISTS worker_profile;
+DROP TABLE IF EXISTS rag_knowledge_chunk;
+DROP TABLE IF EXISTS rag_knowledge_document;
+DROP TABLE IF EXISTS repair_ai_analysis;
+DROP TABLE IF EXISTS ai_task_record;
+DROP TABLE IF EXISTS file_metadata;
+DROP TABLE IF EXISTS repair_notice;
+DROP TABLE IF EXISTS operation_audit_log;
+DROP TABLE IF EXISTS repair_evaluation;
+DROP TABLE IF EXISTS repair_assignment;
+DROP TABLE IF EXISTS repair_ticket_flow;
+DROP TABLE IF EXISTS repair_ticket;
+DROP TABLE IF EXISTS repair_location;
+DROP TABLE IF EXISTS repair_category;
+DROP TABLE IF EXISTS user_account;
+
 CREATE TABLE user_account (
   id BIGINT PRIMARY KEY,
   username VARCHAR(64) NOT NULL,
@@ -148,6 +168,13 @@ CREATE TABLE ai_task_record (
   status VARCHAR(32) NOT NULL,
   error_message CLOB,
   duration_ms BIGINT,
+  prompt_tokens INT,
+  input_tokens INT,
+  output_tokens INT,
+  total_tokens INT,
+  token_source VARCHAR(16),
+  degrade_level VARCHAR(32),
+  degrade_reason VARCHAR(500),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted TINYINT NOT NULL DEFAULT 0
@@ -160,6 +187,7 @@ CREATE TABLE repair_ai_analysis (
   status VARCHAR(32) NOT NULL,
   suggested_category_id BIGINT,
   suggested_priority VARCHAR(20),
+  suggested_worker_id BIGINT,
   fault_summary VARCHAR(200),
   fault_reason VARCHAR(500),
   solution VARCHAR(1000),
@@ -170,6 +198,38 @@ CREATE TABLE repair_ai_analysis (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted TINYINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE worker_profile (
+  worker_id BIGINT PRIMARY KEY,
+  department_name VARCHAR(64) NOT NULL,
+  skill_tags CLOB NOT NULL,
+  dispatch_enabled TINYINT NOT NULL DEFAULT 1,
+  max_active_orders INT NOT NULL DEFAULT 5,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted TINYINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE worker_dispatch_score_snapshot (
+  id BIGINT PRIMARY KEY,
+  ticket_id BIGINT NOT NULL,
+  ai_analysis_id BIGINT,
+  worker_id BIGINT NOT NULL,
+  worker_name VARCHAR(64) NOT NULL,
+  department_name VARCHAR(64),
+  skill_tags CLOB,
+  active_order_count INT NOT NULL DEFAULT 0,
+  max_active_orders INT NOT NULL DEFAULT 5,
+  skill_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  department_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  workload_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  quality_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  penalty_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  total_score DECIMAL(5,2) NOT NULL DEFAULT 0,
+  rule_reason VARCHAR(1000),
+  ai_recommended TINYINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE rag_knowledge_document (
@@ -196,4 +256,56 @@ CREATE TABLE rag_knowledge_chunk (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted TINYINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE rag_eval_case (
+  id BIGINT PRIMARY KEY,
+  dataset_name VARCHAR(64) NOT NULL,
+  question VARCHAR(500) NOT NULL,
+  expected_doc_ids CLOB,
+  expected_keywords CLOB,
+  answerable TINYINT NOT NULL DEFAULT 1,
+  task_type VARCHAR(32) NOT NULL DEFAULT 'factual',
+  category_id BIGINT,
+  source VARCHAR(64),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted TINYINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE rag_eval_run (
+  id BIGINT PRIMARY KEY,
+  dataset_name VARCHAR(64) NOT NULL,
+  top_k INT NOT NULL DEFAULT 5,
+  case_count INT NOT NULL DEFAULT 0,
+  answerable_case_count INT NOT NULL DEFAULT 0,
+  unanswerable_case_count INT NOT NULL DEFAULT 0,
+  hit_rate DECIMAL(6,4) NOT NULL DEFAULT 0,
+  recall_at_k DECIMAL(6,4) NOT NULL DEFAULT 0,
+  precision_at_k DECIMAL(6,4) NOT NULL DEFAULT 0,
+  mrr DECIMAL(6,4) NOT NULL DEFAULT 0,
+  ndcg_at_k DECIMAL(6,4) NOT NULL DEFAULT 0,
+  refusal_accuracy DECIMAL(6,4) NOT NULL DEFAULT 0,
+  avg_latency_ms BIGINT NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'RUNNING',
+  error_message VARCHAR(500),
+  triggered_by BIGINT,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TIMESTAMP
+);
+
+CREATE TABLE rag_eval_case_result (
+  id BIGINT PRIMARY KEY,
+  run_id BIGINT NOT NULL,
+  case_id BIGINT NOT NULL,
+  question VARCHAR(500) NOT NULL,
+  hit TINYINT NOT NULL DEFAULT 0,
+  first_relevant_rank INT,
+  recall DECIMAL(6,4) NOT NULL DEFAULT 0,
+  precision_score DECIMAL(6,4) NOT NULL DEFAULT 0,
+  reciprocal_rank DECIMAL(6,4) NOT NULL DEFAULT 0,
+  ndcg DECIMAL(6,4) NOT NULL DEFAULT 0,
+  latency_ms BIGINT NOT NULL DEFAULT 0,
+  retrieved_chunks CLOB,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

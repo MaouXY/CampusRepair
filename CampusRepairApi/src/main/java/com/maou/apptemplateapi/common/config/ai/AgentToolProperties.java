@@ -50,6 +50,18 @@ public class AgentToolProperties {
     public static class Rag {
         private Milvus milvus = new Milvus();
         private Embedding embedding = new Embedding();
+        private Hybrid hybrid = new Hybrid();
+    }
+
+    @Getter
+    @Setter
+    public static class Hybrid {
+        private boolean enabled = true;
+        private Integer rrfK = 60;
+        private Integer keywordTopK = 10;
+        private Integer vectorTopK = 10;
+        private Double keywordWeight = 1.0;
+        private Double vectorWeight = 1.0;
     }
 
     @Getter

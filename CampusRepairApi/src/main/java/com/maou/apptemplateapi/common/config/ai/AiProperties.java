@@ -16,7 +16,21 @@ public record AiProperties(
         Integer maxImageCount,
         Long maxImageSizeBytes,
         Long maxImageTotalBytes,
-        String imageTransferMode
+        String imageTransferMode,
+        Token token
 ) {
+
+    /**
+     * token 监控与降级兜底配置。
+     */
+    public record Token(
+            Boolean monitorEnabled,
+            Long dailyBudget,
+            Double degradeRatio,
+            Double ruleOnlyRatio,
+            Integer maxPromptTokens,
+            Integer minimalContextChunks
+    ) {
+    }
 }
 

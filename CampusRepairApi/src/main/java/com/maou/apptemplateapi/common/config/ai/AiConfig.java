@@ -1,10 +1,15 @@
 package com.maou.apptemplateapi.common.config.ai;
 
+import com.maou.apptemplateapi.module.ai.dto.AiCompletion;
+import com.maou.apptemplateapi.module.ai.dto.AiTokenUsage;
 import com.maou.apptemplateapi.module.ai.service.AiClient;
 import com.maou.apptemplateapi.module.ai.service.AiImageInput;
+import com.maou.apptemplateapi.module.ai.service.AiTokenEstimator;
 import dev.langchain4j.data.message.*;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.output.TokenUsage;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -22,7 +27,7 @@ import java.util.List;
 public class AiConfig {
 
     @Bean
-    public AiClient aiClient(AiProperties properties) {
+    public AiClient aiClient(AiProperties properties, AiTokenEstimator tokenEstimator) {
         if (!properties.enabled()) {
             String reason = "app.ai.ark.enabled=false";
             if (properties.failFast()) {
@@ -69,7 +74,7 @@ public class AiConfig {
                 .build();
 
         log.info("AI real client activated: LangChain4jAiClient");
-        return new LangChain4jAiClientImpl(chatModel);
+        return new LangChain4jAiClientImpl(chatModel, tokenEstimator);
     }
 
     private boolean isBlank(String value) {
@@ -79,12 +84,12 @@ public class AiConfig {
     private AiClient unavailableClient(String reason) {
         return new AiClient() {
             @Override
-            public String generate(String systemPrompt, String userPrompt) {
+            public AiCompletion complete(String systemPrompt, String userPrompt) {
                 throw new IllegalStateException("AI client unavailable: " + reason);
             }
 
             @Override
-            public String generateWithImages(String systemPrompt, String userPrompt, List<AiImageInput> images) {
+            public AiCompletion completeWithImages(String systemPrompt, String userPrompt, List<AiImageInput> images) {
                 throw new IllegalStateException("AI client unavailable: " + reason);
             }
         };
@@ -93,36 +98,64 @@ public class AiConfig {
     private static final class LangChain4jAiClientImpl implements AiClient {
 
         private final ChatModel chatModel;
+        private final AiTokenEstimator tokenEstimator;
 
-        private LangChain4jAiClientImpl(ChatModel chatModel) {
+        private LangChain4jAiClientImpl(ChatModel chatModel, AiTokenEstimator tokenEstimator) {
             this.chatModel = chatModel;
+            this.tokenEstimator = tokenEstimator;
         }
 
         @Override
-        public String generate(String systemPrompt, String userPrompt) {
+        public AiCompletion complete(String systemPrompt, String userPrompt) {
             String mergedPrompt = systemPrompt + System.lineSeparator() + System.lineSeparator() + userPrompt;
-            return chatModel.chat(mergedPrompt);
+            ChatResponse response = chatModel.chat(UserMessage.from(mergedPrompt));
+            String text = text(response);
+            return toCompletion(response, text,
+                    tokenEstimator.estimate(mergedPrompt), tokenEstimator.estimate(text));
         }
 
         @Override
-        public String generateWithImages(String systemPrompt, String userPrompt, List<AiImageInput> images) {
+        public AiCompletion completeWithImages(String systemPrompt, String userPrompt, List<AiImageInput> images) {
             List<Content> contents = new ArrayList<>();
             contents.add(TextContent.from(userPrompt));
+            int imageCount = 0;
             if (images != null) {
                 for (AiImageInput image : images) {
                     if (StringUtils.hasText(image.imageUrl())) {
                         contents.add(ImageContent.from(image.imageUrl()));
+                        imageCount++;
                     } else if (image.bytes() != null && image.bytes().length > 0) {
                         String base64 = Base64.getEncoder().encodeToString(image.bytes());
                         contents.add(ImageContent.from(base64, image.contentType()));
+                        imageCount++;
                     }
                 }
             }
-            return chatModel.chat(
+            ChatResponse response = chatModel.chat(
                     SystemMessage.from(systemPrompt),
                     UserMessage.from(contents)
-            ).aiMessage().text();
+            );
+            String text = text(response);
+            long estimatedInput = tokenEstimator.estimate(systemPrompt)
+                    + tokenEstimator.estimate(userPrompt)
+                    + tokenEstimator.estimateImages(imageCount);
+            return toCompletion(response, text, estimatedInput, tokenEstimator.estimate(text));
+        }
+
+        private String text(ChatResponse response) {
+            return response == null || response.aiMessage() == null ? null : response.aiMessage().text();
+        }
+
+        private AiCompletion toCompletion(ChatResponse response,
+                                         String text,
+                                         long estimatedInputTokens,
+                                         long estimatedOutputTokens) {
+            TokenUsage usage = response == null ? null : response.tokenUsage();
+            AiTokenUsage tokenUsage = usage == null || usage.inputTokenCount() == null
+                    ? AiTokenUsage.estimated(estimatedInputTokens, estimatedOutputTokens)
+                    : AiTokenUsage.api(usage.inputTokenCount(), usage.outputTokenCount(), usage.totalTokenCount());
+            String modelName = response == null ? null : response.modelName();
+            return AiCompletion.of(text, modelName, tokenUsage);
         }
     }
 }
-

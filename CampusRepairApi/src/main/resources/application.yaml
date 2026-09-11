@@ -1,4 +1,4 @@
-﻿server:
+server:
   port: 8999
 
 spring:
@@ -57,6 +57,19 @@ app:
       max-image-size-bytes: ${APP_AI_MAX_IMAGE_SIZE_BYTES:5242880}
       max-image-total-bytes: ${APP_AI_MAX_IMAGE_TOTAL_BYTES:10485760}
       image-transfer-mode: ${APP_AI_IMAGE_TRANSFER_MODE:BASE64}
+      token:
+        # token 实时监控与降级兜底开关
+        monitor-enabled: ${APP_AI_TOKEN_MONITOR_ENABLED:true}
+        # 每日 token 预算（输入+输出）；达到该值后不再调用模型，直接规则兜底
+        daily-budget: ${APP_AI_TOKEN_DAILY_BUDGET:200000}
+        # 当日用量达到预算该比例时提前压缩上下文
+        degrade-ratio: ${APP_AI_TOKEN_DEGRADE_RATIO:0.8}
+        # 当日用量达到预算该比例时完全降级为规则兜底
+        rule-only-ratio: ${APP_AI_TOKEN_RULE_ONLY_RATIO:1.0}
+        # 单次提示词预估 token 上限；超过则先丢图片，再压缩知识片段
+        max-prompt-tokens: ${APP_AI_TOKEN_MAX_PROMPT_TOKENS:6000}
+        # 压缩上下文时保留的知识片段条数
+        minimal-context-chunks: ${APP_AI_TOKEN_MINIMAL_CONTEXT_CHUNKS:2}
   agent:
     bocha:
       web-search:
@@ -107,6 +120,18 @@ app:
         # Fill in the Ark embedding Model ID or Endpoint ID, for example your doubao embedding endpoint id.
         model: ${APP_RAG_EMBEDDING_MODEL:doubao-embedding-text-240715}
         timeout-seconds: ${APP_RAG_EMBEDDING_TIMEOUT_SECONDS:180}
+      hybrid:
+        # 混合检索：关键词召回 + 向量召回，用 RRF 融合（关闭时退回「向量优先，未命中再走关键词」的旧逻辑）
+        enabled: ${APP_RAG_HYBRID_ENABLED:true}
+        # RRF 平滑常数 k，score = Σ weight / (k + rank)
+        rrf-k: ${APP_RAG_HYBRID_RRF_K:60}
+        # 关键词召回条数
+        keyword-top-k: ${APP_RAG_HYBRID_KEYWORD_TOP_K:10}
+        # 向量召回条数
+        vector-top-k: ${APP_RAG_HYBRID_VECTOR_TOP_K:10}
+        # 两路召回的融合权重
+        keyword-weight: ${APP_RAG_HYBRID_KEYWORD_WEIGHT:1.0}
+        vector-weight: ${APP_RAG_HYBRID_VECTOR_WEIGHT:1.0}
   security:
     jwt:
       secret: ${APP_JWT_SECRET:change-this-campus-repair-secret-to-a-secure-value}

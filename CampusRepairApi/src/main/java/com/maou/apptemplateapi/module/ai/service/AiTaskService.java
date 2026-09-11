@@ -1,7 +1,9 @@
 package com.maou.apptemplateapi.module.ai.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.maou.apptemplateapi.module.ai.dto.AiTokenUsage;
 import com.maou.apptemplateapi.module.ai.entity.AiTaskRecord;
+import com.maou.apptemplateapi.module.ai.enums.DegradeLevel;
 import com.maou.apptemplateapi.module.ai.mapper.AiTaskRecordMapper;
 import com.maou.apptemplateapi.common.config.ai.AiProperties;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +23,7 @@ public class AiTaskService {
     public static final String STATUS_SUCCESS = "SUCCESS";
     public static final String STATUS_FAILED = "FAILED";
     public static final String STATUS_TIMEOUT = "TIMEOUT";
+    public static final String STATUS_DEGRADED = "DEGRADED";
 
     private static final AtomicLong AI_TASK_ID_SEQ = new AtomicLong(System.currentTimeMillis() * 10 + 900_000);
     private static final int SNAPSHOT_LIMIT = 4000;
@@ -53,6 +56,17 @@ public class AiTaskService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markSuccess(Long taskId, String responseSnapshot, long durationMs) {
+        markSuccess(taskId, responseSnapshot, durationMs, null, null, null, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markSuccess(Long taskId,
+                            String responseSnapshot,
+                            long durationMs,
+                            AiTokenUsage usage,
+                            Integer promptTokens,
+                            DegradeLevel degradeLevel,
+                            String degradeReason) {
         AiTaskRecord record = aiTaskRecordMapper.selectById(taskId);
         if (record == null) {
             return;
@@ -60,18 +74,68 @@ public class AiTaskService {
         record.setStatus(STATUS_SUCCESS);
         record.setResponseSnapshot(truncate(responseSnapshot));
         record.setDurationMs(durationMs);
+        applyTokenAudit(record, usage, promptTokens, degradeLevel, degradeReason);
         record.setUpdatedAt(LocalDateTime.now());
         aiTaskRecordMapper.updateById(record);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markFailed(Long taskId, String errorMessage, long durationMs) {
-        markTerminal(taskId, STATUS_FAILED, errorMessage, durationMs);
+        markFailed(taskId, errorMessage, durationMs, null, null, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markFailed(Long taskId,
+                           String errorMessage,
+                           long durationMs,
+                           Integer promptTokens,
+                           DegradeLevel degradeLevel,
+                           String degradeReason) {
+        markTerminal(taskId, STATUS_FAILED, errorMessage, durationMs, promptTokens, degradeLevel, degradeReason);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markTimeout(Long taskId, String errorMessage, long durationMs) {
-        markTerminal(taskId, STATUS_TIMEOUT, errorMessage, durationMs);
+        markTerminal(taskId, STATUS_TIMEOUT, errorMessage, durationMs, null, null, null);
+    }
+
+    /**
+     * 未调用模型、直接规则兜底的降级记录：只保留提示词预估与降级级别。
+     * 注意：这里不写入 token 用量（保持 null），因为本次没有实际消耗，
+     * 否则「当日已用 token」会被虚增，导致后续请求一直被降级。
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markDegraded(Long taskId,
+                             String message,
+                             long durationMs,
+                             Integer promptTokens,
+                             DegradeLevel degradeLevel,
+                             String degradeReason) {
+        AiTaskRecord record = aiTaskRecordMapper.selectById(taskId);
+        if (record == null) {
+            return;
+        }
+        record.setStatus(STATUS_DEGRADED);
+        record.setErrorMessage(truncate(message));
+        record.setDurationMs(durationMs);
+        applyTokenAudit(record, null, promptTokens, degradeLevel, degradeReason);
+        record.setUpdatedAt(LocalDateTime.now());
+        aiTaskRecordMapper.updateById(record);
+    }
+
+    @Transactional(readOnly = true)
+    public long sumTotalTokensSince(LocalDateTime since) {
+        return aiTaskRecordMapper.sumTotalTokensSince(since);
+    }
+
+    @Transactional(readOnly = true)
+    public long countSince(LocalDateTime since) {
+        return aiTaskRecordMapper.countSince(since);
+    }
+
+    @Transactional(readOnly = true)
+    public long countDegradedSince(LocalDateTime since) {
+        return aiTaskRecordMapper.countDegradedSince(since);
     }
 
     @Transactional(readOnly = true)
@@ -107,7 +171,13 @@ public class AiTaskService {
         return aiProperties.maxImageTotalBytes() == null ? 10 * 1024 * 1024L : aiProperties.maxImageTotalBytes();
     }
 
-    private void markTerminal(Long taskId, String status, String errorMessage, long durationMs) {
+    private void markTerminal(Long taskId,
+                              String status,
+                              String errorMessage,
+                              long durationMs,
+                              Integer promptTokens,
+                              DegradeLevel degradeLevel,
+                              String degradeReason) {
         AiTaskRecord record = aiTaskRecordMapper.selectById(taskId);
         if (record == null) {
             return;
@@ -115,8 +185,36 @@ public class AiTaskService {
         record.setStatus(status);
         record.setErrorMessage(truncate(errorMessage));
         record.setDurationMs(durationMs);
+        applyTokenAudit(record, null, promptTokens, degradeLevel, degradeReason);
         record.setUpdatedAt(LocalDateTime.now());
         aiTaskRecordMapper.updateById(record);
+    }
+
+    private void applyTokenAudit(AiTaskRecord record,
+                                 AiTokenUsage usage,
+                                 Integer promptTokens,
+                                 DegradeLevel degradeLevel,
+                                 String degradeReason) {
+        if (promptTokens != null) {
+            record.setPromptTokens(promptTokens);
+        }
+        if (usage != null) {
+            record.setInputTokens(usage.inputTokens());
+            record.setOutputTokens(usage.outputTokens());
+            record.setTotalTokens(usage.total());
+            record.setTokenSource(usage.source());
+        }
+        if (degradeLevel != null) {
+            record.setDegradeLevel(degradeLevel.name());
+            record.setDegradeReason(truncateMessage(degradeReason));
+        }
+    }
+
+    private String truncateMessage(String value) {
+        if (value == null || value.length() <= 500) {
+            return value;
+        }
+        return value.substring(0, 500);
     }
 
     private String truncate(String value) {

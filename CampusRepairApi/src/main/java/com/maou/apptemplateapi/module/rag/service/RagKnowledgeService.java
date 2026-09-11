@@ -12,6 +12,7 @@ import com.maou.apptemplateapi.common.security.CurrentUserProvider;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentRequest;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentResponse;
 import com.maou.apptemplateapi.module.rag.dto.RagChunkResponse;
+import com.maou.apptemplateapi.module.rag.dto.RagSearchResult;
 import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeChunk;
 import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeDocument;
 import com.maou.apptemplateapi.module.rag.mapper.RagKnowledgeChunkMapper;
@@ -25,6 +26,7 @@ import org.springframework.util.StringUtils;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -42,6 +44,7 @@ public class RagKnowledgeService {
     private final MilvusRagVectorService milvusRagVectorService;
     private final RagRerankService ragRerankService;
     private final RagEmbeddingService ragEmbeddingService;
+    private final RagFusionService ragFusionService;
 
     public PageResult<KnowledgeDocumentResponse> listDocuments(long page, long size) {
         requireAdmin("admin-list-rag-documents");
@@ -125,29 +128,86 @@ public class RagKnowledgeService {
     }
 
     public List<RagChunkResponse> search(Long categoryId, String query, int limit) {
+        return searchDetailed(categoryId, query, limit).chunks();
+    }
+
+    /**
+     * 混合检索入口：关键词召回 + 向量召回，RRF 融合后再做重排。
+     */
+    public RagSearchResult searchDetailed(Long categoryId, String query, int limit) {
         List<RagKnowledgeDocument> documents = documentMapper.selectList(new LambdaQueryWrapper<RagKnowledgeDocument>()
                 .eq(RagKnowledgeDocument::getEnabled, 1)
                 .eq(RagKnowledgeDocument::getDeleted, 0)
                 .and(categoryId != null, wrapper -> wrapper.eq(RagKnowledgeDocument::getCategoryId, categoryId).or().isNull(RagKnowledgeDocument::getCategoryId)));
         if (documents.isEmpty() || !StringUtils.hasText(query)) {
-            return List.of();
+            return RagSearchResult.empty();
         }
         int requestedLimit = Math.max(limit, 1);
-        int searchLimit = Math.max(requestedLimit, agentToolProperties.getBocha().getRerank().getTopN() == null ? requestedLimit : agentToolProperties.getBocha().getRerank().getTopN());
+        AgentToolProperties.Hybrid hybrid = agentToolProperties.getRag().getHybrid();
+        int rerankTopN = agentToolProperties.getBocha().getRerank().getTopN() == null
+                ? requestedLimit
+                : agentToolProperties.getBocha().getRerank().getTopN();
+        int fuseLimit = Math.max(requestedLimit, rerankTopN);
         Map<Long, RagKnowledgeDocument> docMap = documents.stream()
                 .collect(Collectors.toMap(RagKnowledgeDocument::getId, doc -> doc));
         Set<Long> docIds = docMap.keySet();
-        List<RagChunkResponse> milvusMatches = milvusRagVectorService.search(query, searchLimit, "rag-search");
-        if (!milvusMatches.isEmpty()) {
-            List<RagChunkResponse> hydratedMatches = hydrateMilvusMatches(milvusMatches, docIds);
-            return ragRerankService.rerank(query, hydratedMatches, "rag-search-milvus")
-                    .stream()
-                    .limit(requestedLimit)
-                    .toList();
+
+        int keywordTopK = hybrid.isEnabled() ? resolveTopK(hybrid.getKeywordTopK(), requestedLimit) : fuseLimit;
+        int vectorTopK = hybrid.isEnabled() ? resolveTopK(hybrid.getVectorTopK(), requestedLimit) : fuseLimit;
+        List<RagChunkResponse> keywordMatches = keywordSearch(docMap, query, keywordTopK);
+        List<RagChunkResponse> vectorMatches = hydrateMilvusMatches(
+                milvusRagVectorService.search(query, vectorTopK, "rag-search"), docIds);
+
+        List<RagChunkResponse> merged;
+        int overlapCount = 0;
+        String topSource;
+        if (!hybrid.isEnabled()) {
+            merged = vectorMatches.isEmpty() ? keywordMatches : vectorMatches;
+            topSource = vectorMatches.isEmpty()
+                    ? (keywordMatches.isEmpty() ? "NONE" : RagFusionService.SOURCE_KEYWORD)
+                    : RagFusionService.SOURCE_VECTOR;
+        } else {
+            int rrfK = hybrid.getRrfK() == null ? RagFusionService.DEFAULT_RRF_K : Math.max(hybrid.getRrfK(), 1);
+            Map<String, List<RagChunkResponse>> rankedLists = new LinkedHashMap<>();
+            rankedLists.put(RagFusionService.SOURCE_KEYWORD, keywordMatches);
+            rankedLists.put(RagFusionService.SOURCE_VECTOR, vectorMatches);
+            Map<String, Double> weights = new LinkedHashMap<>();
+            weights.put(RagFusionService.SOURCE_KEYWORD, positiveOrDefault(hybrid.getKeywordWeight()));
+            weights.put(RagFusionService.SOURCE_VECTOR, positiveOrDefault(hybrid.getVectorWeight()));
+            List<RagFusionService.RagFusionResult> fused = ragFusionService.fuse(rankedLists, weights, rrfK, fuseLimit);
+            merged = fused.stream().map(RagFusionService.RagFusionResult::chunk).toList();
+            overlapCount = (int) fused.stream().filter(RagFusionService.RagFusionResult::fromBothSources).count();
+            topSource = fused.isEmpty() ? "NONE" : fused.get(0).sourceLabel();
         }
+
+        List<RagChunkResponse> reranked = ragRerankService.rerank(query, merged, "rag-search-hybrid")
+                .stream()
+                .limit(requestedLimit)
+                .toList();
+        log.info("rag hybrid search done, scenario=rag-search, hybridEnabled={}, vectorEnabled={}, keywordTopK={}, vectorTopK={}, keywordCandidateCount={}, vectorCandidateCount={}, overlapCount={}, fusedCount={}, returnedCount={}, topSource={}, rerankEnabled={}",
+                hybrid.isEnabled(), milvusRagVectorService.enabled(), keywordTopK, vectorTopK,
+                keywordMatches.size(), vectorMatches.size(), overlapCount, merged.size(), reranked.size(),
+                topSource, agentToolProperties.getBocha().getRerank().isEnabled());
+        return new RagSearchResult(reranked, keywordMatches.size(), vectorMatches.size(), overlapCount,
+                merged.size(), topSource, milvusRagVectorService.enabled());
+    }
+
+    private int resolveTopK(Integer configured, int requestedLimit) {
+        int fallback = Math.max(requestedLimit * 2, requestedLimit);
+        if (configured == null || configured <= 0) {
+            return fallback;
+        }
+        return Math.max(configured, requestedLimit);
+    }
+
+    private double positiveOrDefault(Double value) {
+        return value == null || value <= 0 ? 1.0 : value;
+    }
+
+    private List<RagChunkResponse> keywordSearch(Map<Long, RagKnowledgeDocument> docMap, String query, int limit) {
         Set<String> keywords = tokenize(query);
         return chunkMapper.selectList(new LambdaQueryWrapper<RagKnowledgeChunk>()
-                        .in(RagKnowledgeChunk::getDocumentId, docIds)
+                        .in(RagKnowledgeChunk::getDocumentId, docMap.keySet())
                         .eq(RagKnowledgeChunk::getEnabled, 1)
                         .eq(RagKnowledgeChunk::getDeleted, 0))
                 .stream()
@@ -157,10 +217,10 @@ public class RagKnowledgeService {
                     return new RagChunkResponse(chunk.getId(), chunk.getDocumentId(), doc == null ? null : doc.getTitle(), chunk.getContent(), score);
                 })
                 .filter(chunk -> chunk.score() > 0)
-                .sorted(Comparator.comparingDouble(RagChunkResponse::score).reversed())
-                .limit(searchLimit)
-                .collect(Collectors.collectingAndThen(Collectors.toList(), candidates ->
-                        ragRerankService.rerank(query, candidates, "rag-search-db").stream().limit(requestedLimit).toList()));
+                .sorted(Comparator.comparingDouble(RagChunkResponse::score).reversed()
+                        .thenComparing(RagChunkResponse::id, Comparator.nullsLast(Comparator.naturalOrder())))
+                .limit(Math.max(limit, 1))
+                .toList();
     }
 
     private List<RagChunkResponse> hydrateMilvusMatches(List<RagChunkResponse> matches, Set<Long> allowedDocumentIds) {

@@ -2,6 +2,9 @@ package com.maou.apptemplateapi.module.management.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.maou.apptemplateapi.common.enums.UserRole;
 import com.maou.apptemplateapi.common.exception.BusinessException;
 import com.maou.apptemplateapi.common.exception.ErrorCode;
@@ -12,6 +15,8 @@ import com.maou.apptemplateapi.module.base.entity.RepairCategory;
 import com.maou.apptemplateapi.module.base.entity.RepairLocation;
 import com.maou.apptemplateapi.module.base.mapper.RepairCategoryMapper;
 import com.maou.apptemplateapi.module.base.mapper.RepairLocationMapper;
+import com.maou.apptemplateapi.module.dispatch.entity.WorkerProfile;
+import com.maou.apptemplateapi.module.dispatch.mapper.WorkerProfileMapper;
 import com.maou.apptemplateapi.module.management.dto.AdminCategoryRequest;
 import com.maou.apptemplateapi.module.management.dto.AdminCategoryResponse;
 import com.maou.apptemplateapi.module.management.dto.AdminLocationRequest;
@@ -33,6 +38,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -40,12 +49,16 @@ import java.util.List;
 public class ManagementService {
 
     private static final String DEFAULT_PASSWORD = "123456";
+    private static final String DEFAULT_DEPARTMENT = "综合维修组";
+    private static final int DEFAULT_MAX_ACTIVE_ORDERS = 5;
 
     private final RepairCategoryMapper categoryMapper;
     private final RepairLocationMapper locationMapper;
     private final UserAccountMapper userAccountMapper;
     private final RepairNoticeMapper noticeMapper;
+    private final WorkerProfileMapper workerProfileMapper;
     private final PasswordEncoder passwordEncoder;
+    private final ObjectMapper objectMapper;
 
     public PageResult<AdminCategoryResponse> listCategories(long page, long size) {
         requireAdmin("admin-list-categories");
@@ -139,7 +152,8 @@ public class ManagementService {
                         .eq(UserAccount::getRoleCode, UserRole.WORKER.name())
                         .eq(UserAccount::getDeleted, 0)
                         .orderByDesc(UserAccount::getId));
-        return PageResult.of(result.getRecords().stream().map(this::toWorkerResponse).toList(),
+        Map<Long, WorkerProfile> profiles = loadWorkerProfiles(result.getRecords().stream().map(UserAccount::getId).toList());
+        return PageResult.of(result.getRecords().stream().map(worker -> toWorkerResponse(worker, profiles.get(worker.getId()))).toList(),
                 result.getCurrent(), result.getSize(), result.getTotal());
     }
 
@@ -157,7 +171,8 @@ public class ManagementService {
             log.warn("management data duplicated, scenario=admin-create-worker, username={}", request.username(), exception);
             throw new BusinessException(ErrorCode.MANAGEMENT_DATA_DUPLICATED);
         }
-        return toWorkerResponse(userAccountMapper.selectById(worker.getId()));
+        saveWorkerProfile(worker.getId(), request, "admin-create-worker");
+        return toWorkerResponse(userAccountMapper.selectById(worker.getId()), workerProfileMapper.selectById(worker.getId()));
     }
 
     @Transactional
@@ -176,7 +191,8 @@ public class ManagementService {
                     id, request.username(), exception);
             throw new BusinessException(ErrorCode.MANAGEMENT_DATA_DUPLICATED);
         }
-        return toWorkerResponse(userAccountMapper.selectById(id));
+        saveWorkerProfile(id, request, "admin-update-worker");
+        return toWorkerResponse(userAccountMapper.selectById(id), workerProfileMapper.selectById(id));
     }
 
     @Transactional
@@ -328,6 +344,25 @@ public class ManagementService {
         worker.setEnabled(normalizeEnabled(request.enabled()));
     }
 
+    private void saveWorkerProfile(Long workerId, AdminWorkerRequest request, String scenario) {
+        WorkerProfile profile = workerProfileMapper.selectById(workerId);
+        boolean creating = profile == null;
+        if (profile == null) {
+            profile = new WorkerProfile();
+            profile.setWorkerId(workerId);
+        }
+        profile.setDepartmentName(StringUtils.hasText(request.departmentName()) ? request.departmentName() : DEFAULT_DEPARTMENT);
+        profile.setSkillTags(writeSkillTags(request.skillTags(), scenario, workerId));
+        profile.setDispatchEnabled(normalizeEnabled(request.dispatchEnabled()));
+        profile.setMaxActiveOrders(normalizeMaxActiveOrders(request.maxActiveOrders()));
+        profile.setDeleted(0);
+        if (creating) {
+            workerProfileMapper.insert(profile);
+        } else {
+            workerProfileMapper.updateById(profile);
+        }
+    }
+
     private void applyNotice(RepairNotice notice, NoticeRequest request) {
         notice.setTitle(request.title());
         notice.setContent(request.content());
@@ -338,6 +373,13 @@ public class ManagementService {
 
     private Integer normalizeEnabled(Integer value) {
         return value != null && value == 1 ? 1 : 0;
+    }
+
+    private Integer normalizeMaxActiveOrders(Integer value) {
+        if (value == null) {
+            return DEFAULT_MAX_ACTIVE_ORDERS;
+        }
+        return Math.min(Math.max(value, 1), 20);
     }
 
     private long safePage(long page) {
@@ -358,9 +400,52 @@ public class ManagementService {
                 location.getEnabled(), location.getCreatedAt(), location.getUpdatedAt());
     }
 
-    private AdminWorkerResponse toWorkerResponse(UserAccount worker) {
+    private Map<Long, WorkerProfile> loadWorkerProfiles(List<Long> workerIds) {
+        List<Long> ids = workerIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        return workerProfileMapper.selectBatchIds(ids).stream()
+                .filter(profile -> profile.getDeleted() == null || profile.getDeleted() == 0)
+                .collect(Collectors.toMap(WorkerProfile::getWorkerId, Function.identity(), (left, right) -> left));
+    }
+
+    private AdminWorkerResponse toWorkerResponse(UserAccount worker, WorkerProfile profile) {
+        List<String> skillTags = profile == null ? List.of() : readSkillTags(profile.getSkillTags(), "admin-worker-response", worker.getId());
         return new AdminWorkerResponse(worker.getId(), worker.getUsername(), worker.getRealName(), worker.getPhone(),
-                worker.getEnabled(), worker.getCreatedAt(), worker.getUpdatedAt());
+                worker.getEnabled(),
+                profile == null ? DEFAULT_DEPARTMENT : profile.getDepartmentName(),
+                skillTags,
+                profile == null ? 1 : profile.getDispatchEnabled(),
+                profile == null ? DEFAULT_MAX_ACTIVE_ORDERS : profile.getMaxActiveOrders(),
+                worker.getCreatedAt(), worker.getUpdatedAt());
+    }
+
+    private String writeSkillTags(List<String> skillTags, String scenario, Long workerId) {
+        List<String> normalized = skillTags == null
+                ? List.of()
+                : skillTags.stream().filter(StringUtils::hasText).map(String::trim).distinct().limit(10).toList();
+        try {
+            return objectMapper.writeValueAsString(normalized);
+        } catch (JsonProcessingException exception) {
+            log.error("worker profile skill tags write failed, scenario={}, workerId={}, skillTags={}",
+                    scenario, workerId, skillTags, exception);
+            throw new BusinessException(ErrorCode.MANAGEMENT_DATA_INVALID);
+        }
+    }
+
+    private List<String> readSkillTags(String rawJson, String scenario, Long workerId) {
+        if (!StringUtils.hasText(rawJson)) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(rawJson, new TypeReference<List<String>>() {
+            });
+        } catch (JsonProcessingException exception) {
+            log.error("worker profile skill tags json invalid, scenario={}, workerId={}, rawJson={}",
+                    scenario, workerId, rawJson, exception);
+            return List.of();
+        }
     }
 
     private NoticeResponse toNoticeResponse(RepairNotice notice) {

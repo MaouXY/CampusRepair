@@ -23,6 +23,13 @@ public class AiTaskRecord {
     private String status;
     private String errorMessage;
     private Long durationMs;
+    private Integer promptTokens;
+    private Integer inputTokens;
+    private Integer outputTokens;
+    private Integer totalTokens;
+    private String tokenSource;
+    private String degradeLevel;
+    private String degradeReason;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 

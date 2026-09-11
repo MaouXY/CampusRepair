@@ -17,6 +17,8 @@ import com.maou.apptemplateapi.module.base.entity.RepairLocation;
 import com.maou.apptemplateapi.module.base.mapper.RepairCategoryMapper;
 import com.maou.apptemplateapi.module.base.mapper.RepairLocationMapper;
 import com.maou.apptemplateapi.module.ai.service.TicketAiPreAnalysisTrigger;
+import com.maou.apptemplateapi.module.dispatch.entity.WorkerProfile;
+import com.maou.apptemplateapi.module.dispatch.mapper.WorkerProfileMapper;
 import com.maou.apptemplateapi.module.file.entity.FileMetadata;
 import com.maou.apptemplateapi.module.file.mapper.FileMetadataMapper;
 import com.maou.apptemplateapi.module.ticket.dto.TicketAssignRequest;
@@ -71,6 +73,8 @@ public class TicketService {
     private static final String EMPTY_JSON_ARRAY = "[]";
     private static final String BIZ_TEMP = "TEMP";
     private static final String BIZ_TICKET_REPORT = "TICKET_REPORT_IMAGE";
+    private static final String DEFAULT_WORKER_DEPARTMENT = "综合维修组";
+    private static final int DEFAULT_MAX_ACTIVE_ORDERS = 5;
 
     private final RepairTicketMapper ticketMapper;
     private final RepairTicketFlowMapper flowMapper;
@@ -80,6 +84,7 @@ public class TicketService {
     private final RepairLocationMapper locationMapper;
     private final UserAccountMapper userAccountMapper;
     private final FileMetadataMapper fileMetadataMapper;
+    private final WorkerProfileMapper workerProfileMapper;
     private final ObjectMapper objectMapper;
     private final TicketAiPreAnalysisTrigger ticketAiPreAnalysisTrigger;
     private final OperationAuditService operationAuditService;
@@ -294,13 +299,14 @@ public class TicketService {
 
     public List<WorkerOptionResponse> listWorkerOptions() {
         requireRole(UserRole.ADMIN, "admin-worker-options", null);
-        return userAccountMapper.selectList(new LambdaQueryWrapper<UserAccount>()
+        List<UserAccount> workers = userAccountMapper.selectList(new LambdaQueryWrapper<UserAccount>()
                         .eq(UserAccount::getRoleCode, UserRole.WORKER.name())
                         .eq(UserAccount::getEnabled, 1)
                         .eq(UserAccount::getDeleted, 0)
-                        .orderByAsc(UserAccount::getId))
-                .stream()
-                .map(worker -> new WorkerOptionResponse(worker.getId(), worker.getUsername(), worker.getRealName(), worker.getPhone()))
+                        .orderByAsc(UserAccount::getId));
+        Map<Long, WorkerProfile> profiles = loadWorkerProfiles(workers.stream().map(UserAccount::getId).toList());
+        return workers.stream()
+                .map(worker -> toWorkerOption(worker, profiles.get(worker.getId())))
                 .toList();
     }
 
@@ -715,6 +721,34 @@ public class TicketService {
                 : locationMapper.selectBatchIds(distinctIds).stream().collect(Collectors.toMap(RepairLocation::getId, Function.identity()));
     }
 
+    private Map<Long, WorkerProfile> loadWorkerProfiles(List<Long> workerIds) {
+        List<Long> distinctIds = workerIds.stream().filter(Objects::nonNull).distinct().toList();
+        if (distinctIds.isEmpty()) {
+            return Map.of();
+        }
+        return workerProfileMapper.selectBatchIds(distinctIds).stream()
+                .filter(profile -> profile.getDeleted() == null || profile.getDeleted() == 0)
+                .collect(Collectors.toMap(WorkerProfile::getWorkerId, Function.identity(), (left, right) -> left));
+    }
+
+    private WorkerOptionResponse toWorkerOption(UserAccount worker, WorkerProfile profile) {
+        String department = profile == null ? DEFAULT_WORKER_DEPARTMENT : profile.getDepartmentName();
+        List<String> skillTags = profile == null ? List.of() : readJsonArray(profile.getSkillTags(), "admin-worker-options", null);
+        Integer maxActiveOrders = profile == null || profile.getMaxActiveOrders() == null
+                ? DEFAULT_MAX_ACTIVE_ORDERS
+                : profile.getMaxActiveOrders();
+        return new WorkerOptionResponse(worker.getId(), worker.getUsername(), worker.getRealName(), worker.getPhone(),
+                department, skillTags, activeOrderCount(worker.getId()), maxActiveOrders);
+    }
+
+    private Integer activeOrderCount(Long workerId) {
+        Long count = ticketMapper.selectCount(new LambdaQueryWrapper<RepairTicket>()
+                .eq(RepairTicket::getAssignedWorkerId, workerId)
+                .in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames())
+                .eq(RepairTicket::getDeleted, 0));
+        return count == null ? 0 : count.intValue();
+    }
+
     private String buildSummary(String description) {
         String normalized = description.strip().replaceAll("\\s+", " ");
         return normalized.length() <= 80 ? normalized : normalized.substring(0, 80);
@@ -750,6 +784,20 @@ public class TicketService {
         } catch (JsonProcessingException exception) {
             log.error("ticket image json write failed, scenario={}, ticketId={}, imageUrls={}", scenario, ticketId, imageUrls, exception);
             throw new BusinessException(ErrorCode.FILE_BIND_INVALID);
+        }
+    }
+
+    private List<String> readJsonArray(String rawJson, String scenario, Long ticketId) {
+        if (!StringUtils.hasText(rawJson)) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(rawJson, new TypeReference<List<String>>() {
+            });
+        } catch (JsonProcessingException exception) {
+            log.error("ticket json array read failed, scenario={}, ticketId={}, rawJson={}",
+                    scenario, ticketId, rawJson, exception);
+            return List.of();
         }
     }
 
