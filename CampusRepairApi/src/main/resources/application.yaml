@@ -132,6 +132,15 @@ app:
         # 两路召回的融合权重
         keyword-weight: ${APP_RAG_HYBRID_KEYWORD_WEIGHT:1.0}
         vector-weight: ${APP_RAG_HYBRID_VECTOR_WEIGHT:1.0}
+      ranking:
+        # 向量召回最低余弦相似度：低于该值的匹配在进入 RRF 前丢弃（RRF 只看名次，不过滤会被噪声占位）
+        min-vector-score: ${APP_RAG_MIN_VECTOR_SCORE:0.25}
+        # 关键词召回最低命中词数：提高到 2 可显著降噪，但可能牺牲长尾召回
+        min-keyword-hits: ${APP_RAG_MIN_KEYWORD_HITS:1}
+        # 只对 RRF 结果前 N 条做重排，N 之外保持 RRF 顺序
+        rerank-window: ${APP_RAG_RERANK_WINDOW:20}
+        # 重排融合权重 α：final = α·norm(rerank) + (1-α)·norm(rrf)；1.0=纯重排，0=纯 RRF
+        rerank-blend-weight: ${APP_RAG_RERANK_BLEND_WEIGHT:0.7}
   security:
     jwt:
       secret: ${APP_JWT_SECRET:change-this-campus-repair-secret-to-a-secure-value}

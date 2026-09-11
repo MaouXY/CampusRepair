@@ -16,6 +16,8 @@ public class RagKnowledgeChunk {
     private Long documentId;
     private Integer chunkIndex;
     private String content;
+    /** 所属章节标题，检索结果可直接回引「标准号 + 章节」 */
+    private String sectionTitle;
     private Integer tokenCount;
     private String embeddingProvider;
     private String vectorStoreStatus;

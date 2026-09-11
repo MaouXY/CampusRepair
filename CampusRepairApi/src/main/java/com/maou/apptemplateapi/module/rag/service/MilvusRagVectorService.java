@@ -79,13 +79,17 @@ public class MilvusRagVectorService {
         if (!enabled() || !StringUtils.hasText(query)) {
             return List.of();
         }
+        double minScore = minVectorScore();
         try {
             EmbeddingSearchRequest request = EmbeddingSearchRequest.builder()
                     .queryEmbedding(embeddingService.embed(query, scenario))
                     .maxResults(Math.max(limit, 1))
-                    .minScore(0.0)
+                    .minScore(minScore)
                     .build();
             EmbeddingSearchResult<TextSegment> result = store().search(request);
+            log.info("rag milvus search done, scenario={}, candidateCount={}, minScore={}, collectionName={}",
+                    scenario, result.matches().size(), minScore,
+                    agentToolProperties.getRag().getMilvus().getCollectionName());
             return result.matches().stream()
                     .map(this::toResponse)
                     .toList();
@@ -95,6 +99,17 @@ public class MilvusRagVectorService {
                     agentToolProperties.getRag().getMilvus().getUri(), query, exception);
             return List.of();
         }
+    }
+
+    /**
+     * 向量召回最低相似度阈值：RRF 只看名次，低质量匹配必须在进入融合前过滤，否则「最差候选排第一」也会拿满权重。
+     */
+    private double minVectorScore() {
+        Double configured = agentToolProperties.getRag().getRanking().getMinVectorScore();
+        if (configured == null || configured <= 0) {
+            return 0.0;
+        }
+        return configured;
     }
 
     private RagChunkResponse toResponse(EmbeddingMatch<TextSegment> match) {

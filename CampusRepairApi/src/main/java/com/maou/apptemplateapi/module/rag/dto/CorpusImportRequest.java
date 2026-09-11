@@ -1,22 +1,22 @@
 package com.maou.apptemplateapi.module.rag.dto;
 
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 
-public record KnowledgeDocumentResponse(
-        Long id,
+/**
+ * 单篇语料导入：content 传整篇原文，后端负责清洗 + 章节切分。
+ */
+public record CorpusImportRequest(
         String title,
         Long categoryId,
-        String content,
-        Integer enabled,
-        Integer chunkCount,
         String source,
         String standardNo,
         String docVersion,
         LocalDate effectiveDate,
         String docType,
-        String importBatch,
-        LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        String content,
+        Integer chunkSize,
+        Integer chunkOverlap,
+        Integer enabled,
+        String importBatch
 ) {
 }

@@ -18,6 +18,10 @@ public record RagVectorStatusResponse(
         int rrfK,
         boolean rerankEnabled,
         String rerankModel,
+        double rerankBlendWeight,
+        int rerankWindow,
+        double minVectorScore,
+        int minKeywordHits,
         String message
 ) {
 }
