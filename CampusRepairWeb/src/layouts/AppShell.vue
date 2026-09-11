@@ -73,15 +73,15 @@ const menus = computed(() => [
     title: '后台管理',
     items: [
       {
-        label: '工单管理',
-        path: '/admin/tickets',
-        icon: Document,
-        role: 'ADMIN',
-      },
-      {
         label: '管理首页',
         path: '/admin/dashboard',
         icon: Setting,
+        role: 'ADMIN',
+      },
+      {
+        label: '工单管理',
+        path: '/admin/tickets',
+        icon: Document,
         role: 'ADMIN',
       },
       {
