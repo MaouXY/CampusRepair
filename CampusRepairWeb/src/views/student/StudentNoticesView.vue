@@ -40,6 +40,7 @@ onMounted(async () => {
             <span>
               <el-icon><Calendar /></el-icon>
               {{ formatDateTime(notice.updatedAt || notice.createdAt) }}
+              <template v-if="notice.expireAt">｜有效期至 {{ formatDateTime(notice.expireAt) }}</template>
             </span>
           </div>
           <p>{{ notice.content }}</p>

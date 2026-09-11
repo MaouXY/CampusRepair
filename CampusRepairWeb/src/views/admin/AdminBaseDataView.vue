@@ -8,10 +8,13 @@ import type {
   AdminWorkerRequest,
   Notice,
   NoticeRequest,
+  NoticeStatus,
   NoticeTargetRole,
 } from '@/types/management'
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+
+import { formatDateTime } from '@/utils/ticketDisplay'
 
 import {
   createAdminCategoryApi,
@@ -80,6 +83,8 @@ const noticeForm = reactive<NoticeRequest>({
   targetRole: 'ALL',
   published: 1,
   sortOrder: 10,
+  effectiveAt: null,
+  expireAt: null,
 })
 
 const drawerTitle = computed(() => `${editingId.value ? '编辑' : '新增'}${tabLabel(activeTab.value)}`)
@@ -144,6 +149,28 @@ function targetRoleText(value: NoticeTargetRole) {
   }[value]
 }
 
+function noticeStatusText(status: NoticeStatus) {
+  return {
+    DISABLED: '已下架',
+    NOT_STARTED: '未生效',
+    ACTIVE: '有效中',
+    EXPIRED: '已过期',
+  }[status] || status
+}
+
+function noticeStatusTagType(status: NoticeStatus) {
+  if (status === 'ACTIVE') return 'success'
+  if (status === 'NOT_STARTED') return 'warning'
+  if (status === 'EXPIRED') return 'danger'
+  return 'info'
+}
+
+function validityText(row: Notice) {
+  const from = row.effectiveAt ? formatDateTime(row.effectiveAt) : '立即'
+  const to = row.expireAt ? formatDateTime(row.expireAt) : '长期'
+  return `${from} ~ ${to}`
+}
+
 async function loadCurrent() {
   loading.value = true
   try {
@@ -184,7 +211,15 @@ function resetForms() {
     dispatchEnabled: 1,
     maxActiveOrders: 5,
   })
-  Object.assign(noticeForm, { title: '', content: '', targetRole: 'ALL', published: 1, sortOrder: 10 })
+  Object.assign(noticeForm, {
+  title: '',
+  content: '',
+  targetRole: 'ALL',
+  published: 1,
+  sortOrder: 10,
+  effectiveAt: null,
+  expireAt: null,
+})
 }
 
 function openCreate() {
@@ -232,6 +267,8 @@ function openEdit(row: AdminCategory | AdminLocation | AdminWorker | Notice) {
       targetRole: item.targetRole,
       published: item.published,
       sortOrder: item.sortOrder,
+      effectiveAt: item.effectiveAt,
+      expireAt: item.expireAt,
     })
   }
   drawerVisible.value = true
@@ -359,10 +396,13 @@ loadCurrent()
           <el-table-column label="可见角色" width="110">
             <template #default="{ row }">{{ targetRoleText(row.targetRole) }}</template>
           </el-table-column>
-          <el-table-column prop="sortOrder" label="排序" width="100" />
+          <el-table-column label="有效期" min-width="200">
+            <template #default="{ row }">{{ validityText(row) }}</template>
+          </el-table-column>
+          <el-table-column prop="sortOrder" label="排序" width="90" />
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
-              <el-tag :type="row.published === 1 ? 'success' : 'info'">{{ row.published === 1 ? '发布' : '草稿' }}</el-tag>
+              <el-tag :type="noticeStatusTagType(row.status)">{{ noticeStatusText(row.status) }}</el-tag>
             </template>
           </el-table-column>
         </template>
@@ -486,6 +526,31 @@ loadCurrent()
           <el-form-item label="排序">
             <el-input-number v-model="noticeForm.sortOrder" :min="0" />
           </el-form-item>
+          <el-form-item label="生效时间">
+            <el-date-picker
+              v-model="noticeForm.effectiveAt"
+              type="datetime"
+              placeholder="留空表示立即生效"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+              clearable
+            />
+          </el-form-item>
+          <el-form-item label="过期时间">
+            <el-date-picker
+              v-model="noticeForm.expireAt"
+              type="datetime"
+              placeholder="留空表示永不过期"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+              clearable
+            />
+          </el-form-item>
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            title="有效期说明"
+            description="到期后公告自动不再下发到学生/维修员端，无需手动下架；管理端仍可见并标注「已过期」。"
+          />
           <el-form-item label="发布">
             <el-switch v-model="noticeForm.published" :active-value="1" :inactive-value="0" />
           </el-form-item>

@@ -37,6 +37,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -215,9 +216,17 @@ public class ManagementService {
 
     public List<NoticeResponse> listPublishedNotices() {
         CurrentUser currentUser = CurrentUserProvider.require();
+        LocalDateTime now = LocalDateTime.now();
         return noticeMapper.selectList(new LambdaQueryWrapper<RepairNotice>()
                         .eq(RepairNotice::getPublished, 1)
                         .eq(RepairNotice::getDeleted, 0)
+                        // 有效期过滤：未到生效时间 或 已过期 的公告不下发
+                        .and(wrapper -> wrapper.isNull(RepairNotice::getEffectiveAt)
+                                .or()
+                                .le(RepairNotice::getEffectiveAt, now))
+                        .and(wrapper -> wrapper.isNull(RepairNotice::getExpireAt)
+                                .or()
+                                .gt(RepairNotice::getExpireAt, now))
                         .and(wrapper -> wrapper.eq(RepairNotice::getTargetRole, "ALL")
                                 .or()
                                 .eq(RepairNotice::getTargetRole, currentUser.getRoleCode()))
@@ -225,7 +234,7 @@ public class ManagementService {
                         .orderByDesc(RepairNotice::getId)
                         .last("limit 10"))
                 .stream()
-                .map(this::toNoticeResponse)
+                .map(notice -> toNoticeResponse(notice, now))
                 .toList();
     }
 
@@ -323,6 +332,13 @@ public class ManagementService {
             log.warn("management data invalid, scenario={}, targetRole={}", scenario, request.targetRole());
             throw new BusinessException(ErrorCode.MANAGEMENT_DATA_INVALID);
         }
+        // 有效期校验：过期时间必须晚于生效时间
+        if (request.effectiveAt() != null && request.expireAt() != null
+                && !request.expireAt().isAfter(request.effectiveAt())) {
+            log.warn("management data invalid, scenario={}, reason=expire-before-effective, effectiveAt={}, expireAt={}",
+                    scenario, request.effectiveAt(), request.expireAt());
+            throw new BusinessException(ErrorCode.MANAGEMENT_DATA_INVALID);
+        }
     }
 
     private void applyCategory(RepairCategory category, AdminCategoryRequest request) {
@@ -369,6 +385,8 @@ public class ManagementService {
         notice.setTargetRole(request.targetRole());
         notice.setPublished(normalizeEnabled(request.published()));
         notice.setSortOrder(request.sortOrder());
+        notice.setEffectiveAt(request.effectiveAt());
+        notice.setExpireAt(request.expireAt());
     }
 
     private Integer normalizeEnabled(Integer value) {
@@ -449,7 +467,28 @@ public class ManagementService {
     }
 
     private NoticeResponse toNoticeResponse(RepairNotice notice) {
+        return toNoticeResponse(notice, LocalDateTime.now());
+    }
+
+    /**
+     * 计算公告状态：已下架 / 未生效 / 有效中 / 已过期。管理端列表始终返回全部公告及状态。
+     */
+    private NoticeResponse toNoticeResponse(RepairNotice notice, LocalDateTime now) {
         return new NoticeResponse(notice.getId(), notice.getTitle(), notice.getContent(), notice.getTargetRole(),
-                notice.getPublished(), notice.getSortOrder(), notice.getCreatedBy(), notice.getCreatedAt(), notice.getUpdatedAt());
+                notice.getPublished(), notice.getSortOrder(), notice.getEffectiveAt(), notice.getExpireAt(),
+                noticeStatus(notice, now), notice.getCreatedBy(), notice.getCreatedAt(), notice.getUpdatedAt());
+    }
+
+    private String noticeStatus(RepairNotice notice, LocalDateTime now) {
+        if (notice.getPublished() == null || notice.getPublished() != 1) {
+            return "DISABLED";
+        }
+        if (notice.getEffectiveAt() != null && notice.getEffectiveAt().isAfter(now)) {
+            return "NOT_STARTED";
+        }
+        if (notice.getExpireAt() != null && !notice.getExpireAt().isAfter(now)) {
+            return "EXPIRED";
+        }
+        return "ACTIVE";
     }
 }

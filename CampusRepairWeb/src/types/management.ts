@@ -60,6 +60,8 @@ export interface AdminWorkerRequest {
   maxActiveOrders: number
 }
 
+export type NoticeStatus = 'DISABLED' | 'NOT_STARTED' | 'ACTIVE' | 'EXPIRED'
+
 export interface Notice {
   id: string
   title: string
@@ -67,6 +69,9 @@ export interface Notice {
   targetRole: NoticeTargetRole
   published: number
   sortOrder: number
+  effectiveAt: string | null
+  expireAt: string | null
+  status: NoticeStatus
   createdBy: string
   createdAt: string
   updatedAt: string
@@ -78,6 +83,8 @@ export interface NoticeRequest {
   targetRole: NoticeTargetRole
   published: number
   sortOrder: number
+  effectiveAt: string | null
+  expireAt: string | null
 }
 
 export type ManagementPage<T> = PageResult<T>
