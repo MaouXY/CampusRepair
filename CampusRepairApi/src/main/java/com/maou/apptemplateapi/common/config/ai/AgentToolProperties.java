@@ -79,6 +79,11 @@ public class AgentToolProperties {
         private Double minVectorScore = 0.25;
         /** 关键词召回最低命中词数，低于该值的片段直接丢弃。 */
         private Integer minKeywordHits = 1;
+        /**
+         * RRF 融合后保留的候选池大小（与最终返回条数解耦）。
+         * 若候选池等于最终 limit，重排就没有可操作空间，本该命中但 RRF 排名靠后的片段会直接丢失。
+         */
+        private Integer fuseTopK = 20;
         /** 只对 RRF 结果的前 N 条做重排，N 之外保持 RRF 顺序。 */
         private Integer rerankWindow = 20;
         /** 重排融合权重 α：final = α·norm(rerank) + (1-α)·norm(rrf)；1.0 为纯重排，0 表示忽略重排结果。 */

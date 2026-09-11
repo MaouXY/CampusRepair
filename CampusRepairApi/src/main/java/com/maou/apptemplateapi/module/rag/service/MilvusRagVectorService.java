@@ -50,7 +50,6 @@ public class MilvusRagVectorService {
         try {
             MilvusEmbeddingStore store = store();
             java.util.ArrayList<String> ids = new java.util.ArrayList<>();
-            java.util.ArrayList<dev.langchain4j.data.embedding.Embedding> embeddings = new java.util.ArrayList<>();
             java.util.ArrayList<TextSegment> segments = new java.util.ArrayList<>();
             for (RagKnowledgeChunk chunk : chunks) {
                 Metadata metadata = new Metadata()
@@ -58,13 +57,20 @@ public class MilvusRagVectorService {
                         .put("chunkId", chunk.getId())
                         .put("chunkIndex", chunk.getChunkIndex());
                 ids.add(String.valueOf(chunk.getId()));
-                embeddings.add(embeddingService.embed(chunk.getContent(), scenario));
                 segments.add(TextSegment.from(chunk.getContent(), metadata));
             }
-            if (!ids.isEmpty()) {
-                store.addAll(ids, embeddings, segments);
+            if (ids.isEmpty()) {
+                return true;
             }
-            log.info("rag milvus indexed, scenario={}, documentId={}, chunkCount={}, collectionName={}",
+            // 批量向量化：一次提交多条，避免逐条请求在批量导入时把连接打崩
+            java.util.List<dev.langchain4j.data.embedding.Embedding> embeddings = embeddingService.embedAll(
+                    chunks.stream().map(RagKnowledgeChunk::getContent).toList(), scenario);
+            if (embeddings.size() != ids.size()) {
+                throw new IllegalStateException("rag embedding size mismatch, expected=%d, actual=%d"
+                        .formatted(ids.size(), embeddings.size()));
+            }
+            store.addAll(ids, embeddings, segments);
+            log.info("rag milvus indexed, scenario={}, documentId={}, chunkCount={}, batchEmbedding=true, collectionName={}",
                     scenario, documentId, chunks.size(), agentToolProperties.getRag().getMilvus().getCollectionName());
             return true;
         } catch (RuntimeException exception) {
@@ -110,6 +116,62 @@ public class MilvusRagVectorService {
             return 0.0;
         }
         return configured;
+    }
+
+    /**
+     * 删除指定切片在向量库中的向量。
+     *
+     * <p>重建文档时切片行会被物理删除并重新生成，如果向量库只增不删，旧向量会长期残留：
+     * 检索会命中这些已不存在的 chunkId，回表时被丢弃，表现为「返回 10 条、实际只剩 4 条」。
+     */
+    public void removeChunks(List<String> chunkIds, String scenario) {
+        if (!enabled() || chunkIds == null || chunkIds.isEmpty()) {
+            return;
+        }
+        try {
+            store().removeAll(chunkIds);
+            log.info("rag milvus stale vectors removed, scenario={}, chunkCount={}, collectionName={}",
+                    scenario, chunkIds.size(), agentToolProperties.getRag().getMilvus().getCollectionName());
+        } catch (RuntimeException exception) {
+            log.error("rag milvus stale vector removal failed, scenario={}, chunkCount={}, collectionName={}",
+                    scenario, chunkIds.size(), agentToolProperties.getRag().getMilvus().getCollectionName(), exception);
+        }
+    }
+
+    /**
+     * 清空并重建集合：多项目共用 Milvus 时用于彻底清理本项目集合中的历史脏向量。
+     */
+    public boolean resetCollection(String scenario) {
+        if (!enabled()) {
+            return false;
+        }
+        try {
+            MilvusServiceClient client = new MilvusServiceClient(connectParam(agentToolProperties.getRag().getMilvus()));
+            try {
+                R<?> dropResult = client.dropCollection(DropCollectionParam.newBuilder()
+                        .withCollectionName(agentToolProperties.getRag().getMilvus().getCollectionName())
+                        .build());
+                if (dropResult.getStatus() != 0) {
+                    throw new IllegalStateException("Milvus dropCollection failed, status=%s, message=%s"
+                            .formatted(dropResult.getStatus(), dropResult.getMessage()));
+                }
+                waitUntilCollectionDropped(client, agentToolProperties.getRag().getMilvus());
+            } finally {
+                try {
+                    client.close(1);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            embeddingStore = null;
+            log.warn("rag milvus collection reset, scenario={}, collectionName={}",
+                    scenario, agentToolProperties.getRag().getMilvus().getCollectionName());
+            return true;
+        } catch (RuntimeException exception) {
+            log.error("rag milvus collection reset failed, scenario={}, collectionName={}",
+                    scenario, agentToolProperties.getRag().getMilvus().getCollectionName(), exception);
+            return false;
+        }
     }
 
     private RagChunkResponse toResponse(EmbeddingMatch<TextSegment> match) {

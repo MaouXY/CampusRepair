@@ -16,6 +16,7 @@ public record RagVectorStatusResponse(
         long failedChunkCount,
         boolean hybridEnabled,
         int rrfK,
+        int fuseTopK,
         boolean rerankEnabled,
         String rerankModel,
         double rerankBlendWeight,

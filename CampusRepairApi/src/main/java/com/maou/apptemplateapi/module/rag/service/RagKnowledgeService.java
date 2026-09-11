@@ -12,6 +12,7 @@ import com.maou.apptemplateapi.common.security.CurrentUserProvider;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentRequest;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentResponse;
 import com.maou.apptemplateapi.module.rag.dto.RagChunkResponse;
+import com.maou.apptemplateapi.module.rag.dto.RagSearchDebugResponse;
 import com.maou.apptemplateapi.module.rag.dto.RagSearchResult;
 import com.maou.apptemplateapi.module.rag.dto.RagVectorStatusResponse;
 import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeChunk;
@@ -49,6 +50,7 @@ public class RagKnowledgeService {
     private final RagFusionService ragFusionService;
     private final RagRankBlender ragRankBlender;
     private final RagCorpusSplitter ragCorpusSplitter;
+    private final RagSearchTraceService ragSearchTraceService;
 
     public PageResult<KnowledgeDocumentResponse> listDocuments(long page, long size) {
         requireAdmin("admin-list-rag-documents");
@@ -134,6 +136,7 @@ public class RagKnowledgeService {
                                           List<RagCorpusSplitter.CorpusSection> sections,
                                           String scenario) {
         Long documentId = document.getId();
+        List<Long> staleChunkIds = existingChunkIds(documentId);
         int deletedChunks = chunkMapper.physicalDeleteByDocumentId(documentId);
         List<RagKnowledgeChunk> savedChunks = new java.util.ArrayList<>();
         int index = 0;
@@ -149,7 +152,25 @@ public class RagKnowledgeService {
         }
         log.info("rag corpus chunks replaced, scenario={}, documentId={}, deletedChunkCount={}, insertedChunkCount={}, milvusEnabled={}, vectorSynced={}",
                 scenario, documentId, deletedChunks, savedChunks.size(), milvusRagVectorService.enabled(), vectorSynced);
+        milvusRagVectorService.removeChunks(staleChunkIds.stream().map(String::valueOf).toList(), scenario);
         return savedChunks.size();
+    }
+
+    /**
+     * 清空本项目向量集合并按当前切片全量重建：多项目共用 Milvus 时用于清理历史脏向量。
+     */
+    @Transactional
+    public RagVectorStatusResponse resetVectorStore() {
+        requireAdmin("admin-rag-vector-reset");
+        boolean dropped = milvusRagVectorService.resetCollection("admin-rag-vector-reset");
+        List<RagKnowledgeDocument> documents = documentMapper.selectList(new LambdaQueryWrapper<RagKnowledgeDocument>()
+                .eq(RagKnowledgeDocument::getDeleted, 0));
+        for (RagKnowledgeDocument document : documents) {
+            rebuildChunks(document, "admin-rag-vector-reset");
+        }
+        log.warn("rag vector store reset done, scenario=admin-rag-vector-reset, collectionDropped={}, documentCount={}",
+                dropped, documents.size());
+        return vectorStatus();
     }
 
     /**
@@ -224,7 +245,9 @@ public class RagKnowledgeService {
         RagVectorStatusResponse response = new RagVectorStatusResponse(
                 ragEmbeddingService.provider(), ragEmbeddingService.modelName(), ragEmbeddingService.dimension(),
                 milvusRagVectorService.enabled(), milvus.getCollectionName(), documentCount, chunkCount,
-                synced, pending, failed, hybrid.isEnabled(), rrfK, rerank.isEnabled(), rerank.getModel(),
+                synced, pending, failed, hybrid.isEnabled(), rrfK,
+                windowOf(agentToolProperties.getRag().getRanking().getFuseTopK(), 20),
+                rerank.isEnabled(), rerank.getModel(),
                 rankingOf(agentToolProperties.getRag().getRanking().getRerankBlendWeight(), 0.7),
                 windowOf(agentToolProperties.getRag().getRanking().getRerankWindow(), 20),
                 rankingOf(agentToolProperties.getRag().getRanking().getMinVectorScore(), 0.0),
@@ -265,6 +288,7 @@ public class RagKnowledgeService {
      */
     private int rebuildChunks(RagKnowledgeDocument document, String scenario) {
         Long documentId = document.getId();
+        List<Long> staleChunkIds = existingChunkIds(documentId);
         int deletedChunks = chunkMapper.physicalDeleteByDocumentId(documentId);
         Integer configuredChunkSize = agentToolProperties.getRag().getMilvus().getChunkSize();
         Integer configuredOverlap = agentToolProperties.getRag().getMilvus().getChunkOverlap();
@@ -290,12 +314,25 @@ public class RagKnowledgeService {
                 chunkMapper.updateById(chunk);
             }
         }
+        milvusRagVectorService.removeChunks(staleChunkIds.stream().map(String::valueOf).toList(), scenario);
         log.info("rag document rebuilt, scenario={}, documentId={}, structuredSections={}, chunkCount={}, milvusEnabled={}, collectionName={}, rerankEnabled={}",
                 scenario, documentId, structured, savedChunks.size(), agentToolProperties.getRag().getMilvus().isEnabled(),
                 agentToolProperties.getRag().getMilvus().getCollectionName(), agentToolProperties.getBocha().getRerank().isEnabled());
         log.info("rag document chunks replaced, scenario={}, documentId={}, deletedChunkCount={}, insertedChunkCount={}",
                 scenario, documentId, deletedChunks, savedChunks.size());
         return savedChunks.size();
+    }
+
+    /**
+     * 读取待重建文档的现有切片ID，用于同步清理向量库中的旧向量（避免「只增不删」导致脏向量堆积）。
+     */
+    private List<Long> existingChunkIds(Long documentId) {
+        return chunkMapper.selectList(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                        .eq(RagKnowledgeChunk::getDocumentId, documentId))
+                .stream()
+                .map(RagKnowledgeChunk::getId)
+                .filter(java.util.Objects::nonNull)
+                .toList();
     }
 
     private RagKnowledgeChunk insertChunk(RagKnowledgeDocument document, int index, String content, String sectionTitle) {
@@ -327,12 +364,62 @@ public class RagKnowledgeService {
         if (documents.isEmpty() || !StringUtils.hasText(query)) {
             return RagSearchResult.empty();
         }
+        PipelineOutcome outcome = runPipeline(documents, query, limit);
+        log.info("rag hybrid search done, scenario=rag-search, hybridEnabled={}, vectorEnabled={}, keywordTopK={}, vectorTopK={}, minKeywordHits={}, minVectorScore={}, keywordCandidateCount={}, vectorCandidateCount={}, overlapCount={}, fusedCount={}, returnedCount={}, topSource={}, rerankApplied={}, rerankSkipReason={}, rerankBlendWeight={}, rerankWindow={}",
+                outcome.hybridEnabled(), outcome.vectorEnabled(), outcome.keywordTopK(), outcome.vectorTopK(),
+                outcome.minKeywordHits(), outcome.minVectorScore(),
+                outcome.keywordMatches().size(), outcome.vectorMatches().size(), outcome.overlapCount(),
+                outcome.fused().size(), outcome.ordered().size(),
+                outcome.topSource(), outcome.rerankOutcome().applied(), outcome.rerankOutcome().reason(),
+                outcome.blendWeight(), outcome.rerankWindow());
+        return new RagSearchResult(outcome.ordered(), outcome.keywordMatches().size(), outcome.vectorMatches().size(),
+                outcome.overlapCount(), outcome.fused().size(), outcome.topSource(), outcome.vectorEnabled(),
+                outcome.rerankOutcome().applied(), outcome.rerankOutcome().reason(),
+                outcome.blendWeight(), outcome.rerankWindow());
+    }
+
+    /**
+     * 检索链路调试视图：管理员可看到关键词/向量/RRF/重排各段候选与分数，
+     * 用来判断「召回不到」还是「排不进前 N」。
+     */
+    public RagSearchDebugResponse debugSearch(Long categoryId, String query, int limit) {
+        requireAdmin("admin-rag-search-debug");
+        List<RagKnowledgeDocument> documents = selectSearchableDocuments(categoryId);
+        if (documents.isEmpty() || !StringUtils.hasText(query)) {
+            return new RagSearchDebugResponse(query, Math.max(limit, 1), agentToolProperties.getRag().getHybrid().isEnabled(),
+                    milvusRagVectorService.enabled(), 0, 0, minKeywordHits(),
+                    rankingMinVectorScore(), agentToolProperties.getBocha().getRerank().isEnabled(), "empty-documents",
+                    0, 0, List.of(), List.of(), List.of(), List.of());
+        }
+        PipelineOutcome outcome = runPipeline(documents, query, limit);
+        return ragSearchTraceService.toDebugResponse(query, Math.max(limit, 1), outcome.hybridEnabled(), outcome.vectorEnabled(),
+                outcome.keywordTopK(), outcome.vectorTopK(), outcome.minKeywordHits(), outcome.minVectorScore(),
+                agentToolProperties.getBocha().getRerank().isEnabled(), outcome.rerankOutcome().reason(),
+                outcome.blendWeight(), outcome.rerankWindow(), outcome.docMap(), outcome.keywordMatches(),
+                outcome.vectorMatches(), outcome.fused(), ragSearchTraceService.rankMap(outcome.ordered()),
+                outcome.rerankOutcome().scores());
+    }
+
+    private List<RagKnowledgeDocument> selectSearchableDocuments(Long categoryId) {
+        return documentMapper.selectList(new LambdaQueryWrapper<RagKnowledgeDocument>()
+                .eq(RagKnowledgeDocument::getEnabled, 1)
+                .eq(RagKnowledgeDocument::getDeleted, 0)
+                .and(categoryId != null, wrapper -> wrapper.eq(RagKnowledgeDocument::getCategoryId, categoryId).or().isNull(RagKnowledgeDocument::getCategoryId)));
+    }
+
+    /**
+     * 混合检索主流程：关键词召回 + 向量召回 → RRF 融合 → 窗口内重排加权融合。
+     * 检索与调试视图共用，避免两套逻辑分叉。
+     */
+    private PipelineOutcome runPipeline(List<RagKnowledgeDocument> documents, String query, int limit) {
         int requestedLimit = Math.max(limit, 1);
         AgentToolProperties.Hybrid hybrid = agentToolProperties.getRag().getHybrid();
         int rerankTopN = agentToolProperties.getBocha().getRerank().getTopN() == null
                 ? requestedLimit
                 : agentToolProperties.getBocha().getRerank().getTopN();
-        int fuseLimit = Math.max(requestedLimit, rerankTopN);
+        Integer configuredFuseTopK = agentToolProperties.getRag().getRanking().getFuseTopK();
+        int fuseTopK = configuredFuseTopK == null || configuredFuseTopK <= 0 ? 20 : configuredFuseTopK;
+        int fuseLimit = Math.max(Math.max(requestedLimit, rerankTopN), fuseTopK);
         Map<Long, RagKnowledgeDocument> docMap = documents.stream()
                 .collect(Collectors.toMap(RagKnowledgeDocument::getId, doc -> doc));
         Set<Long> docIds = docMap.keySet();
@@ -371,30 +458,47 @@ public class RagKnowledgeService {
         int rerankWindow = ranking.getRerankWindow() == null || ranking.getRerankWindow() <= 0
                 ? fuseLimit
                 : Math.max(ranking.getRerankWindow(), 1);
-        boolean rerankApplied = false;
-        String rerankSkipReason = "hybrid-disabled";
         List<RagChunkResponse> ordered;
+        RagRerankService.RerankOutcome rerankOutcome;
         if (fusedResults.isEmpty()) {
             ordered = merged.stream().limit(requestedLimit).toList();
-            rerankSkipReason = "no-fused-candidates";
+            rerankOutcome = RagRerankService.RerankOutcome.skipped("no-fused-candidates");
         } else {
             int window = Math.min(rerankWindow, fusedResults.size());
             List<RagChunkResponse> windowCandidates = fusedResults.subList(0, window).stream()
                     .map(RagFusionService.RagFusionResult::chunk)
                     .toList();
-            RagRerankService.RerankOutcome outcome = ragRerankService.rerankScores(query, windowCandidates, "rag-search-rerank");
-            rerankApplied = outcome.applied();
-            rerankSkipReason = outcome.reason();
-            ordered = ragRankBlender.blend(fusedResults, outcome.scores(), blendWeight, window, requestedLimit, "rag-search-blend");
+            rerankOutcome = ragRerankService.rerankScores(query, windowCandidates, "rag-search-rerank");
+            ordered = ragRankBlender.blend(fusedResults, rerankOutcome.scores(), blendWeight, window, requestedLimit, "rag-search-blend");
         }
-        log.info("rag hybrid search done, scenario=rag-search, hybridEnabled={}, vectorEnabled={}, keywordTopK={}, vectorTopK={}, minKeywordHits={}, minVectorScore={}, keywordCandidateCount={}, vectorCandidateCount={}, overlapCount={}, fusedCount={}, returnedCount={}, topSource={}, rerankApplied={}, rerankSkipReason={}, rerankBlendWeight={}, rerankWindow={}",
+        return new PipelineOutcome(docMap, keywordMatches, vectorMatches, fusedResults, ordered, overlapCount, topSource,
                 hybrid.isEnabled(), milvusRagVectorService.enabled(), keywordTopK, vectorTopK,
-                ranking.getMinKeywordHits(), ranking.getMinVectorScore(),
-                keywordMatches.size(), vectorMatches.size(), overlapCount, merged.size(), ordered.size(),
-                topSource, rerankApplied, rerankSkipReason, blendWeight, rerankWindow);
-        return new RagSearchResult(ordered, keywordMatches.size(), vectorMatches.size(), overlapCount,
-                merged.size(), topSource, milvusRagVectorService.enabled(), rerankApplied, rerankSkipReason,
-                blendWeight, rerankWindow);
+                minKeywordHits(), rankingMinVectorScore(), rerankOutcome, blendWeight, rerankWindow);
+    }
+
+    private record PipelineOutcome(
+            Map<Long, RagKnowledgeDocument> docMap,
+            List<RagChunkResponse> keywordMatches,
+            List<RagChunkResponse> vectorMatches,
+            List<RagFusionService.RagFusionResult> fused,
+            List<RagChunkResponse> ordered,
+            int overlapCount,
+            String topSource,
+            boolean hybridEnabled,
+            boolean vectorEnabled,
+            int keywordTopK,
+            int vectorTopK,
+            int minKeywordHits,
+            double minVectorScore,
+            RagRerankService.RerankOutcome rerankOutcome,
+            double blendWeight,
+            int rerankWindow
+    ) {
+    }
+
+    private double rankingMinVectorScore() {
+        Double configured = agentToolProperties.getRag().getRanking().getMinVectorScore();
+        return configured == null || configured <= 0 ? 0.0 : configured;
     }
 
     private int resolveTopK(Integer configured, int requestedLimit) {
