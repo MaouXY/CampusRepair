@@ -4,6 +4,7 @@ import com.maou.apptemplateapi.common.result.ApiResponse;
 import com.maou.apptemplateapi.common.result.PageResult;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentRequest;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentResponse;
+import com.maou.apptemplateapi.module.rag.dto.RagVectorStatusResponse;
 import com.maou.apptemplateapi.module.rag.service.RagKnowledgeService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -52,5 +53,10 @@ public class AdminRagController {
     @PostMapping("/documents/{id}/rebuild")
     public ApiResponse<Integer> rebuild(@PathVariable Long id) {
         return ApiResponse.success(ragKnowledgeService.rebuildDocumentChunks(id));
+    }
+
+    @GetMapping("/vector-status")
+    public ApiResponse<RagVectorStatusResponse> vectorStatus() {
+        return ApiResponse.success(ragKnowledgeService.vectorStatus());
     }
 }

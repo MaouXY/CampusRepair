@@ -1,6 +1,7 @@
 DROP TABLE IF EXISTS rag_eval_case_result;
 DROP TABLE IF EXISTS rag_eval_run;
 DROP TABLE IF EXISTS rag_eval_case;
+DROP TABLE IF EXISTS rag_knowledge_draft;
 DROP TABLE IF EXISTS worker_dispatch_score_snapshot;
 DROP TABLE IF EXISTS worker_profile;
 DROP TABLE IF EXISTS rag_knowledge_chunk;
@@ -253,6 +254,24 @@ CREATE TABLE rag_knowledge_chunk (
   embedding_provider VARCHAR(64) NOT NULL DEFAULT 'LOCAL_HASH',
   vector_store_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
   enabled TINYINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  deleted TINYINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE rag_knowledge_draft (
+  id BIGINT PRIMARY KEY,
+  source_ticket_id BIGINT,
+  title VARCHAR(160) NOT NULL,
+  content CLOB NOT NULL,
+  category_id BIGINT,
+  status VARCHAR(32) NOT NULL DEFAULT 'PENDING_REVIEW',
+  created_by_ai TINYINT NOT NULL DEFAULT 1,
+  generate_source VARCHAR(32) NOT NULL DEFAULT 'AI',
+  review_remark VARCHAR(500),
+  reviewed_by BIGINT,
+  reviewed_at TIMESTAMP,
+  knowledge_document_id BIGINT,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted TINYINT NOT NULL DEFAULT 0

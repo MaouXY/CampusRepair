@@ -13,6 +13,7 @@ import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentRequest;
 import com.maou.apptemplateapi.module.rag.dto.KnowledgeDocumentResponse;
 import com.maou.apptemplateapi.module.rag.dto.RagChunkResponse;
 import com.maou.apptemplateapi.module.rag.dto.RagSearchResult;
+import com.maou.apptemplateapi.module.rag.dto.RagVectorStatusResponse;
 import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeChunk;
 import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeDocument;
 import com.maou.apptemplateapi.module.rag.mapper.RagKnowledgeChunkMapper;
@@ -92,6 +93,72 @@ public class RagKnowledgeService {
         requireAdmin("admin-rebuild-rag-document");
         RagKnowledgeDocument document = requireDocument(documentId, "admin-rebuild-rag-document");
         return rebuildChunks(document, "admin-rebuild-rag-document");
+    }
+
+    /**
+     * 知识草稿审核入库：由草稿服务在管理员审核通过后调用（内部方法，鉴权在调用方完成）。
+     */
+    @Transactional
+    public KnowledgeDocumentResponse createDocumentFromDraft(String title,
+                                                             Long categoryId,
+                                                             String content,
+                                                             Long operatorId,
+                                                             String scenario) {
+        RagKnowledgeDocument document = new RagKnowledgeDocument();
+        document.setTitle(title);
+        document.setCategoryId(categoryId);
+        document.setContent(content);
+        document.setEnabled(1);
+        document.setCreatedBy(operatorId);
+        documentMapper.insert(document);
+        int chunkCount = rebuildChunks(document, scenario);
+        log.info("rag document created from draft, scenario={}, documentId={}, categoryId={}, chunkCount={}, operatorId={}",
+                scenario, document.getId(), categoryId, chunkCount, operatorId);
+        return toResponse(documentMapper.selectById(document.getId()), chunkCount);
+    }
+
+    /**
+     * 向量检索真实状态核对：Embedding 提供方/模型/维度 + Milvus 开关 + 切片同步情况 + 混合检索与重排配置。
+     */
+    public RagVectorStatusResponse vectorStatus() {
+        requireAdmin("admin-rag-vector-status");
+        AgentToolProperties.Milvus milvus = agentToolProperties.getRag().getMilvus();
+        AgentToolProperties.Hybrid hybrid = agentToolProperties.getRag().getHybrid();
+        AgentToolProperties.Rerank rerank = agentToolProperties.getBocha().getRerank();
+        long documentCount = documentMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeDocument>()
+                .eq(RagKnowledgeDocument::getDeleted, 0));
+        long chunkCount = chunkMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                .eq(RagKnowledgeChunk::getDeleted, 0));
+        long synced = countChunkByVectorStatus("SYNCED");
+        long pending = countChunkByVectorStatus("PENDING");
+        long failed = countChunkByVectorStatus("FAILED");
+        int rrfK = hybrid.getRrfK() == null ? RagFusionService.DEFAULT_RRF_K : Math.max(hybrid.getRrfK(), 1);
+        String message;
+        if (!milvusRagVectorService.enabled()) {
+            message = "向量检索未启用：当前为关键词检索（可选混合检索），历史切片状态不参与打分";
+        } else if (failed > 0) {
+            message = "存在 %d 个切片同步失败，建议在知识管理中执行「重建」后复查".formatted(failed);
+        } else if (pending > 0) {
+            message = "存在 %d 个切片待同步，稍后或重建后即可检索".formatted(pending);
+        } else {
+            message = "向量检索已启用且切片已全部同步";
+        }
+        RagVectorStatusResponse response = new RagVectorStatusResponse(
+                ragEmbeddingService.provider(), ragEmbeddingService.modelName(), ragEmbeddingService.dimension(),
+                milvusRagVectorService.enabled(), milvus.getCollectionName(), documentCount, chunkCount,
+                synced, pending, failed, hybrid.isEnabled(), rrfK, rerank.isEnabled(), rerank.getModel(), message);
+        log.info("rag vector status queried, scenario=admin-rag-vector-status, provider={}, model={}, dimension={}, milvusEnabled={}, collectionName={}, documentCount={}, chunkCount={}, synced={}, pending={}, failed={}, hybridEnabled={}, rrfK={}, rerankEnabled={}",
+                response.embeddingProvider(), response.embeddingModel(), response.dimension(), response.milvusEnabled(),
+                response.collectionName(), documentCount, chunkCount, synced, pending, failed,
+                response.hybridEnabled(), response.rrfK(), response.rerankEnabled());
+        return response;
+    }
+
+    private long countChunkByVectorStatus(String status) {
+        Long count = chunkMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                .eq(RagKnowledgeChunk::getDeleted, 0)
+                .eq(RagKnowledgeChunk::getVectorStoreStatus, status));
+        return count == null ? 0 : count;
     }
 
     private int rebuildChunks(RagKnowledgeDocument document, String scenario) {

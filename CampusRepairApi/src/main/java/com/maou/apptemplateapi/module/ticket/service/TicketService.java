@@ -19,6 +19,7 @@ import com.maou.apptemplateapi.module.base.mapper.RepairLocationMapper;
 import com.maou.apptemplateapi.module.ai.service.TicketAiPreAnalysisTrigger;
 import com.maou.apptemplateapi.module.dispatch.entity.WorkerProfile;
 import com.maou.apptemplateapi.module.dispatch.mapper.WorkerProfileMapper;
+import com.maou.apptemplateapi.module.rag.service.RagKnowledgeDraftTrigger;
 import com.maou.apptemplateapi.module.file.entity.FileMetadata;
 import com.maou.apptemplateapi.module.file.mapper.FileMetadataMapper;
 import com.maou.apptemplateapi.module.ticket.dto.TicketAssignRequest;
@@ -87,6 +88,7 @@ public class TicketService {
     private final WorkerProfileMapper workerProfileMapper;
     private final ObjectMapper objectMapper;
     private final TicketAiPreAnalysisTrigger ticketAiPreAnalysisTrigger;
+    private final RagKnowledgeDraftTrigger ragKnowledgeDraftTrigger;
     private final OperationAuditService operationAuditService;
 
     @Transactional
@@ -164,6 +166,7 @@ public class TicketService {
         evaluationMapper.insert(evaluation);
 
         transition(ticket, TicketStatus.COMPLETED, currentUser, TicketAction.EVALUATE, "学生评价完成");
+        triggerKnowledgeDraftAfterCommit(ticketId);
         return toDetail(getTicket(ticketId));
     }
 
@@ -687,6 +690,23 @@ public class TicketService {
             return;
         }
         ticketAiPreAnalysisTrigger.trigger(ticketId, studentId, scenario);
+    }
+
+    /**
+     * 工单闭环后异步沉淀知识草稿（第三阶段 V3），不阻塞学生评价主流程。
+     */
+    private void triggerKnowledgeDraftAfterCommit(Long ticketId) {
+        String scenario = "ticket-evaluated-knowledge-draft";
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    ragKnowledgeDraftTrigger.trigger(ticketId, scenario);
+                }
+            });
+            return;
+        }
+        ragKnowledgeDraftTrigger.trigger(ticketId, scenario);
     }
 
     private boolean isSlaOverdue(RepairTicket ticket) {
