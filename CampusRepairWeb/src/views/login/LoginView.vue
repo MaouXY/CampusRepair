@@ -81,7 +81,7 @@ async function handleLogin() {
     <section class="login-card">
       <div class="login-card__header">
         <h2>账号登录</h2>
-        <p>阶段 1 已接入后端认证接口，使用测试账号可进入对应工作台。</p>
+        <p>请使用校内账号登录，系统将按角色进入对应工作台。</p>
       </div>
 
       <el-form label-position="top" @submit.prevent="handleLogin">
