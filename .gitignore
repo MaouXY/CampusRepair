@@ -1,0 +1,16 @@
+# 数据库备份（含业务数据，不入库）
+backup/
+
+# 前端构建产物
+CampusRepairWeb/dist/
+CampusRepairWeb/node_modules/
+CampusRepairWeb/dev-server.log
+CampusRepairWeb/dev-server.err.log
+
+# 后端运行日志与构建产物
+CampusRepairApi/target/
+CampusRepairApi/*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
