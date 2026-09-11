@@ -12,6 +12,19 @@ app:
   ai:
     ark:
       enabled: false
+  agent:
+    bocha:
+      rerank:
+        # 测试环境不调用外部重排服务，验证「重排关闭时退回 RRF 顺序」
+        enabled: false
+        api-key:
+    rag:
+      milvus:
+        # 测试必须封闭：不连真实 Milvus，避免依赖外部服务与污染生产集合
+        enabled: false
+      embedding:
+        # 用本地哈希向量，避免测试消耗真实 Embedding 额度
+        provider: LOCAL_HASH
   security:
     jwt:
       secret: test-campus-repair-secret-should-be-long-enough

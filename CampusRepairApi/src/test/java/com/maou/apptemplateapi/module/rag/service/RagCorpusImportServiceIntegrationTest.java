@@ -171,6 +171,34 @@ class RagCorpusImportServiceIntegrationTest {
     }
 
     @Test
+    void shouldKeepSectionStructureWhenRebuildingStructuredDocument() throws Exception {
+        String body = mockMvc.perform(post("/api/v1/admin/rag/corpus/import")
+                        .header("Authorization", bearer(adminToken()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(new CorpusImportRequest("校园设备维保规范", 20001L,
+                                "示例规范", "GB-TEST-2026", "2026", null, "standard", SAMPLE_CORPUS, 800, 120, 1, "batch-rebuild"))))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString(StandardCharsets.UTF_8);
+        CorpusImportResponse imported = objectMapper.treeToValue(objectMapper.readTree(body).path("data"), CorpusImportResponse.class);
+        int importedChunks = imported.chunkCount();
+
+        mockMvc.perform(post("/api/v1/admin/rag/documents/{id}/rebuild", imported.documentId())
+                        .header("Authorization", bearer(adminToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data").value(importedChunks));
+
+        List<RagKnowledgeChunk> chunks = chunkMapper.selectList(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                .eq(RagKnowledgeChunk::getDocumentId, imported.documentId())
+                .orderByAsc(RagKnowledgeChunk::getChunkIndex));
+        assertThat(chunks).as("重建后仍保留章节切片").hasSize(importedChunks);
+        assertThat(chunks).extracting(RagKnowledgeChunk::getSectionTitle).doesNotContainNull();
+        assertThat(chunks).allMatch(chunk -> chunk.getContent().startsWith("【章节】"));
+    }
+
+    @Test
     void shouldRejectBlankContentAndNonAdmin() throws Exception {
         mockMvc.perform(post("/api/v1/admin/rag/corpus/import")
                         .header("Authorization", bearer(adminToken()))

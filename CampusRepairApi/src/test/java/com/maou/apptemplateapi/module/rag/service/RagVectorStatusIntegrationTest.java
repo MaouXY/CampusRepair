@@ -5,6 +5,8 @@ import com.maou.apptemplateapi.common.security.CurrentUser;
 import com.maou.apptemplateapi.common.security.JwtTokenService;
 import com.maou.apptemplateapi.common.security.LoginType;
 import com.maou.apptemplateapi.module.rag.dto.RagVectorStatusResponse;
+import com.maou.apptemplateapi.module.rag.entity.RagKnowledgeChunk;
+import com.maou.apptemplateapi.module.rag.mapper.RagKnowledgeChunkMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -37,6 +39,39 @@ class RagVectorStatusIntegrationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private RagKnowledgeChunkMapper chunkMapper;
+
+    @Test
+    @org.springframework.transaction.annotation.Transactional
+    void shouldIgnoreOrphanChunksWithoutDocument() throws Exception {
+        String before = mockMvc.perform(get("/api/v1/admin/rag/vector-status")
+                        .header("Authorization", bearer(token(10003L, "admin01", UserRole.ADMIN))))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        long chunkCountBefore = objectMapper.readTree(before).path("data").path("chunkCount").asLong();
+
+        RagKnowledgeChunk orphan = new RagKnowledgeChunk();
+        orphan.setId(99001L);
+        orphan.setDocumentId(999999L);
+        orphan.setChunkIndex(0);
+        orphan.setContent("孤儿切片：所属文档已不存在");
+        orphan.setTokenCount(8);
+        orphan.setEmbeddingProvider("LOCAL_HASH:test");
+        orphan.setVectorStoreStatus("PENDING");
+        orphan.setEnabled(1);
+        orphan.setDeleted(0);
+        chunkMapper.insert(orphan);
+
+        String after = mockMvc.perform(get("/api/v1/admin/rag/vector-status")
+                        .header("Authorization", bearer(token(10003L, "admin01", UserRole.ADMIN))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(objectMapper.readTree(after).path("data").path("chunkCount").asLong())
+                .as("孤儿切片不参与同步率统计").isEqualTo(chunkCountBefore);
+    }
 
     @Test
     void shouldExposeVectorStatusForAdmin() throws Exception {

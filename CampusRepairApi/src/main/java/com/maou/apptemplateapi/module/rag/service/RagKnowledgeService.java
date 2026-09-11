@@ -48,6 +48,7 @@ public class RagKnowledgeService {
     private final RagEmbeddingService ragEmbeddingService;
     private final RagFusionService ragFusionService;
     private final RagRankBlender ragRankBlender;
+    private final RagCorpusSplitter ragCorpusSplitter;
 
     public PageResult<KnowledgeDocumentResponse> listDocuments(long page, long size) {
         requireAdmin("admin-list-rag-documents");
@@ -137,17 +138,7 @@ public class RagKnowledgeService {
         List<RagKnowledgeChunk> savedChunks = new java.util.ArrayList<>();
         int index = 0;
         for (RagCorpusSplitter.CorpusSection section : sections) {
-            RagKnowledgeChunk chunk = new RagKnowledgeChunk();
-            chunk.setDocumentId(documentId);
-            chunk.setChunkIndex(index++);
-            chunk.setContent(section.content());
-            chunk.setSectionTitle(section.sectionTitle());
-            chunk.setTokenCount(Math.max(1, section.content().length() / 2));
-            chunk.setEmbeddingProvider("%s:%s".formatted(ragEmbeddingService.provider(), ragEmbeddingService.modelName()));
-            chunk.setVectorStoreStatus(milvusRagVectorService.enabled() ? "PENDING" : "DISABLED");
-            chunk.setEnabled(document.getEnabled());
-            chunkMapper.insert(chunk);
-            savedChunks.add(chunk);
+            savedChunks.add(insertChunk(document, index++, section.content(), section.sectionTitle()));
         }
         boolean vectorSynced = milvusRagVectorService.rebuildDocument(documentId, savedChunks, scenario);
         if (milvusRagVectorService.enabled()) {
@@ -206,11 +197,19 @@ public class RagKnowledgeService {
         AgentToolProperties.Rerank rerank = agentToolProperties.getBocha().getRerank();
         long documentCount = documentMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeDocument>()
                 .eq(RagKnowledgeDocument::getDeleted, 0));
-        long chunkCount = chunkMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeChunk>()
-                .eq(RagKnowledgeChunk::getDeleted, 0));
-        long synced = countChunkByVectorStatus("SYNCED");
-        long pending = countChunkByVectorStatus("PENDING");
-        long failed = countChunkByVectorStatus("FAILED");
+        List<Long> documentIds = documentMapper.selectList(new LambdaQueryWrapper<RagKnowledgeDocument>()
+                        .select(RagKnowledgeDocument::getId)
+                        .eq(RagKnowledgeDocument::getDeleted, 0))
+                .stream()
+                .map(RagKnowledgeDocument::getId)
+                .toList();
+        // 只统计仍存在文档的切片：历史遗留的孤儿切片（文档已删）不参与同步率统计
+        long chunkCount = documentIds.isEmpty() ? 0 : chunkMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeChunk>()
+                .eq(RagKnowledgeChunk::getDeleted, 0)
+                .in(RagKnowledgeChunk::getDocumentId, documentIds));
+        long synced = countChunkByVectorStatus(documentIds, "SYNCED");
+        long pending = countChunkByVectorStatus(documentIds, "PENDING");
+        long failed = countChunkByVectorStatus(documentIds, "FAILED");
         int rrfK = hybrid.getRrfK() == null ? RagFusionService.DEFAULT_RRF_K : Math.max(hybrid.getRrfK(), 1);
         String message;
         if (!milvusRagVectorService.enabled()) {
@@ -238,9 +237,13 @@ public class RagKnowledgeService {
         return response;
     }
 
-    private long countChunkByVectorStatus(String status) {
+    private long countChunkByVectorStatus(List<Long> documentIds, String status) {
+        if (documentIds.isEmpty()) {
+            return 0;
+        }
         Long count = chunkMapper.selectCount(new LambdaQueryWrapper<RagKnowledgeChunk>()
                 .eq(RagKnowledgeChunk::getDeleted, 0)
+                .in(RagKnowledgeChunk::getDocumentId, documentIds)
                 .eq(RagKnowledgeChunk::getVectorStoreStatus, status));
         return count == null ? 0 : count;
     }
@@ -253,22 +256,32 @@ public class RagKnowledgeService {
         return value == null || value <= 0 ? fallback : value;
     }
 
+    /**
+     * 重建切片。
+     *
+     * <p>文档带章节结构（如导入的规范/手册）时，按章节切分并保留 {@code section_title}，
+     * 与语料导入的切片方式保持一致——否则「重建」会把章节切片重新压成定长切片，
+     * 丢掉章节信息并让检索质量回退；没有识别到章节标题的普通文档仍走原有定长切分。
+     */
     private int rebuildChunks(RagKnowledgeDocument document, String scenario) {
         Long documentId = document.getId();
         int deletedChunks = chunkMapper.physicalDeleteByDocumentId(documentId);
-        List<String> chunks = splitText(document.getContent());
+        Integer configuredChunkSize = agentToolProperties.getRag().getMilvus().getChunkSize();
+        Integer configuredOverlap = agentToolProperties.getRag().getMilvus().getChunkOverlap();
+        List<RagCorpusSplitter.CorpusSection> sections = ragCorpusSplitter.split(document.getContent(),
+                configuredChunkSize, configuredOverlap);
+        boolean structured = sections.stream()
+                .anyMatch(section -> !"正文".equals(section.sectionTitle()));
         List<RagKnowledgeChunk> savedChunks = new java.util.ArrayList<>();
-        for (int i = 0; i < chunks.size(); i++) {
-            RagKnowledgeChunk chunk = new RagKnowledgeChunk();
-            chunk.setDocumentId(documentId);
-            chunk.setChunkIndex(i);
-            chunk.setContent(chunks.get(i));
-            chunk.setTokenCount(Math.max(1, chunks.get(i).length() / 2));
-            chunk.setEmbeddingProvider("%s:%s".formatted(ragEmbeddingService.provider(), ragEmbeddingService.modelName()));
-            chunk.setVectorStoreStatus(milvusRagVectorService.enabled() ? "PENDING" : "DISABLED");
-            chunk.setEnabled(document.getEnabled());
-            chunkMapper.insert(chunk);
-            savedChunks.add(chunk);
+        int index = 0;
+        if (structured) {
+            for (RagCorpusSplitter.CorpusSection section : sections) {
+                savedChunks.add(insertChunk(document, index++, section.content(), section.sectionTitle()));
+            }
+        } else {
+            for (String content : splitText(document.getContent())) {
+                savedChunks.add(insertChunk(document, index++, content, null));
+            }
         }
         boolean vectorSynced = milvusRagVectorService.rebuildDocument(documentId, savedChunks, scenario);
         if (milvusRagVectorService.enabled()) {
@@ -277,13 +290,26 @@ public class RagKnowledgeService {
                 chunkMapper.updateById(chunk);
             }
         }
-        log.info("rag document rebuilt, scenario={}, documentId={}, chunkCount={}, milvusEnabled={}, collectionName={}, rerankEnabled={}",
-                scenario,
-                documentId, chunks.size(), agentToolProperties.getRag().getMilvus().isEnabled(),
+        log.info("rag document rebuilt, scenario={}, documentId={}, structuredSections={}, chunkCount={}, milvusEnabled={}, collectionName={}, rerankEnabled={}",
+                scenario, documentId, structured, savedChunks.size(), agentToolProperties.getRag().getMilvus().isEnabled(),
                 agentToolProperties.getRag().getMilvus().getCollectionName(), agentToolProperties.getBocha().getRerank().isEnabled());
         log.info("rag document chunks replaced, scenario={}, documentId={}, deletedChunkCount={}, insertedChunkCount={}",
-                scenario, documentId, deletedChunks, chunks.size());
-        return chunks.size();
+                scenario, documentId, deletedChunks, savedChunks.size());
+        return savedChunks.size();
+    }
+
+    private RagKnowledgeChunk insertChunk(RagKnowledgeDocument document, int index, String content, String sectionTitle) {
+        RagKnowledgeChunk chunk = new RagKnowledgeChunk();
+        chunk.setDocumentId(document.getId());
+        chunk.setChunkIndex(index);
+        chunk.setContent(content);
+        chunk.setSectionTitle(sectionTitle);
+        chunk.setTokenCount(Math.max(1, content.length() / 2));
+        chunk.setEmbeddingProvider("%s:%s".formatted(ragEmbeddingService.provider(), ragEmbeddingService.modelName()));
+        chunk.setVectorStoreStatus(milvusRagVectorService.enabled() ? "PENDING" : "DISABLED");
+        chunk.setEnabled(document.getEnabled());
+        chunkMapper.insert(chunk);
+        return chunk;
     }
 
     public List<RagChunkResponse> search(Long categoryId, String query, int limit) {
