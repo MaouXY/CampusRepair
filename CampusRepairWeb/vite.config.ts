@@ -13,6 +13,11 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    // Windows 下编辑器/工具写入临时文件时，Vite 的文件监听会抛 EBUSY 直接把进程打挂
+    // （曾导致 dev server 在演示期间崩溃），这里忽略临时目录与常见交换文件。
+    watch: {
+      ignored: ['**/*.tmp', '**/*.tmpdir/**', '**/.*.tmpdir/**', '**/*.swp', '**/*~'],
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8999',

@@ -1387,3 +1387,171 @@ select {
     justify-items: start;
   }
 }
+
+/* ================= 数据总览：单屏自适应大屏 =================
+   目标：整个页面铺满一屏、不产生页面级滚动；内容按视口高度动态压缩，
+   底部两块面板空间不足时在面板内部滚动，而不是把整页撑长。 */
+.shell--screen {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.shell--screen .shell__main {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 大屏模式压缩页头，把空间让给数据 */
+.shell--screen .shell__header {
+  padding: clamp(8px, 1.1vh, 16px) clamp(16px, 1.6vw, 26px);
+}
+
+.shell--screen .shell__header h1 {
+  margin: 0;
+  font-size: clamp(18px, 2.2vh, 24px);
+}
+
+.shell--screen .shell__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(10px, 1.4vh, 18px) clamp(14px, 1.5vw, 24px) clamp(10px, 1.4vh, 18px);
+  overflow: hidden;
+}
+
+.screen-page {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: clamp(8px, 1.2vh, 16px);
+}
+
+/* 概览横幅：高度随视口收缩 */
+.screen-page .screen-summary {
+  min-height: 0;
+  padding: clamp(12px, 1.8vh, 24px) clamp(16px, 1.8vw, 28px);
+  gap: clamp(12px, 1.4vw, 24px);
+}
+
+.screen-page .screen-summary h2 {
+  font-size: clamp(18px, 2.6vh, 26px);
+}
+
+.screen-page .screen-summary p:last-child {
+  margin: clamp(4px, 0.6vh, 10px) 0 0;
+  font-size: clamp(12px, 1.5vh, 14px);
+}
+
+.screen-page .screen-summary__ring {
+  width: clamp(96px, 15vh, 150px);
+  height: clamp(96px, 15vh, 150px);
+}
+
+.screen-page .screen-summary__ring strong {
+  font-size: clamp(20px, 3vh, 30px);
+}
+
+/* KPI 卡片：五列一行，高度自适应（去掉固定 min-height） */
+.screen-page .screen-kpi-grid {
+  min-height: 0;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: clamp(8px, 1vw, 16px);
+}
+
+.screen-page .screen-kpi {
+  min-height: 0;
+  padding: clamp(10px, 1.4vh, 18px);
+}
+
+.screen-page .screen-kpi strong {
+  font-size: clamp(20px, 2.8vh, 30px);
+}
+
+.screen-page .screen-kpi__icon {
+  width: clamp(32px, 4.4vh, 44px);
+  height: clamp(32px, 4.4vh, 44px);
+}
+
+.screen-page .screen-kpi p {
+  margin: clamp(6px, 1vh, 14px) 0 4px;
+}
+
+/* 底部两块：占满剩余高度，内部必要时滚动 */
+.screen-page .screen-insight-grid {
+  min-height: 0;
+  align-items: stretch;
+  gap: clamp(10px, 1.2vw, 20px);
+}
+
+.screen-page .screen-chart,
+.screen-page .screen-analysis {
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(12px, 1.6vh, 22px);
+}
+
+.screen-page .screen-bars {
+  gap: clamp(8px, 1.1vh, 16px);
+}
+
+.screen-page .screen-analysis {
+  gap: clamp(8px, 1.2vh, 16px);
+}
+
+.screen-page .screen-analysis h3 {
+  font-size: clamp(16px, 2.2vh, 22px);
+}
+
+.screen-page .screen-analysis__item {
+  padding: clamp(10px, 1.4vh, 16px);
+}
+
+/* 矮屏进一步压缩：隐藏横幅说明文字，让数据区拿回空间 */
+@media (max-height: 820px) {
+  .screen-page .screen-summary p:last-child {
+    display: none;
+  }
+
+  .screen-page .screen-summary {
+    padding-top: clamp(10px, 1.2vh, 16px);
+    padding-bottom: clamp(10px, 1.2vh, 16px);
+  }
+
+  .screen-page .screen-kpi small {
+    display: none;
+  }
+}
+
+/* 超矮屏（如 1280x720 投屏）最简化呈现 */
+@media (max-height: 700px) {
+  .shell--screen .shell__header .shell__eyebrow {
+    display: none;
+  }
+
+  .screen-page .screen-summary h2 {
+    font-size: 18px;
+  }
+
+  .screen-page .screen-summary__ring {
+    width: 84px;
+    height: 84px;
+  }
+}
+
+/* 窄屏：底部两块改为上下堆叠 */
+@media (max-width: 1280px) {
+  .shell--screen .shell__content {
+    overflow: auto;
+  }
+
+  .screen-page {
+    grid-template-rows: auto auto auto;
+  }
+
+  .screen-page .screen-insight-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

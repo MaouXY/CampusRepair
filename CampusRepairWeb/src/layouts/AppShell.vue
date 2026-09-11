@@ -28,6 +28,9 @@ const roleLabel = computed(() => {
   return '学生'
 })
 
+/** 数据总览按「数据大屏」呈现：整页不滚动，内容自适应铺满一屏 */
+const isScreenRoute = computed(() => route.path.startsWith('/screen'))
+
 const menus = computed(() => [
   {
     title: '学生服务',
@@ -113,7 +116,7 @@ function handleLogout() {
 </script>
 
 <template>
-  <div class="shell" :class="{ 'shell--collapsed': appStore.sidebarCollapsed }">
+  <div class="shell" :class="{ 'shell--collapsed': appStore.sidebarCollapsed, 'shell--screen': isScreenRoute }">
     <AppSidebar
       :collapsed="appStore.sidebarCollapsed"
       :menus="menus"
