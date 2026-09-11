@@ -112,6 +112,47 @@ export interface KnowledgeDraft {
 
 export type KnowledgeDraftPage = PageResult<KnowledgeDraft>
 
+export interface CorpusSectionPreview {
+  sectionTitle: string
+  sectionLevel: number
+  charCount: number
+  sample: string
+}
+
+export interface CorpusPreview {
+  title: string
+  sectionCount: number
+  chunkCount: number
+  totalChars: number
+  avgChunkChars: number
+  sections: CorpusSectionPreview[]
+}
+
+export interface CorpusImportResult {
+  documentId: string
+  title: string
+  standardNo: string | null
+  sectionCount: number
+  chunkCount: number
+  importBatch: string
+  sections: string[]
+}
+
+export interface CorpusImportRequest {
+  title: string
+  categoryId: string | null
+  source: string | null
+  standardNo: string | null
+  docVersion: string | null
+  effectiveDate: string | null
+  docType: string | null
+  content: string
+  chunkSize: number
+  chunkOverlap: number
+  enabled: number
+  importBatch: string | null
+}
+
 export interface RagVectorStatus {
   embeddingProvider: string
   embeddingModel: string
@@ -127,5 +168,9 @@ export interface RagVectorStatus {
   rrfK: number
   rerankEnabled: boolean
   rerankModel: string
+  rerankBlendWeight: number
+  rerankWindow: number
+  minVectorScore: number
+  minKeywordHits: number
   message: string
 }

@@ -1,5 +1,8 @@
 import type {
   AiTokenUsage,
+  CorpusImportRequest,
+  CorpusImportResult,
+  CorpusPreview,
   KnowledgeDocument,
   KnowledgeDocumentPage,
   KnowledgeDocumentRequest,
@@ -106,4 +109,28 @@ export function rejectKnowledgeDraftApi(draftId: string, remark: string) {
 
 export function getRagVectorStatusApi() {
   return request.get<never, RagVectorStatus>('/admin/rag/vector-status')
+}
+
+export function previewCorpusApi(payload: CorpusImportRequest) {
+  return request.post<never, CorpusPreview>(
+    '/admin/rag/corpus/preview',
+    payload,
+  )
+}
+
+export function importCorpusApi(payload: CorpusImportRequest) {
+  return request.post<never, CorpusImportResult>(
+    '/admin/rag/corpus/import',
+    payload,
+  )
+}
+
+export function importCorpusBatchApi(payload: {
+  batchName: string
+  documents: unknown[]
+}) {
+  return request.post<never, CorpusImportResult[]>(
+    '/admin/rag/corpus/import-batch',
+    payload,
+  )
 }
