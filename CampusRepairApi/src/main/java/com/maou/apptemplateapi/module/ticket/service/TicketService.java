@@ -63,6 +63,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -228,7 +229,8 @@ public class TicketService {
                 .eq(RepairTicket::getStatus, TicketStatus.RETURNED.name()));
         Long waitingConfirm = countTickets(new LambdaQueryWrapper<RepairTicket>()
                 .eq(RepairTicket::getStatus, TicketStatus.WAITING_CONFIRM.name()));
-        Long overdue = countTickets(activeTicketWrapper()
+        Long overdue = countTickets(new LambdaQueryWrapper<RepairTicket>()
+                .in(RepairTicket::getStatus, slaTrackedStatusNames())
                 .isNotNull(RepairTicket::getSlaDeadlineAt)
                 .lt(RepairTicket::getSlaDeadlineAt, now));
         Long urged = countTickets(activeTicketWrapper()
@@ -374,7 +376,8 @@ public class TicketService {
         Long waitingConfirm = countTickets(new LambdaQueryWrapper<RepairTicket>()
                 .eq(RepairTicket::getAssignedWorkerId, currentUser.getId())
                 .eq(RepairTicket::getStatus, TicketStatus.WAITING_CONFIRM.name()));
-        Long overdue = countTickets(activeTicketWrapper()
+        Long overdue = countTickets(new LambdaQueryWrapper<RepairTicket>()
+                .in(RepairTicket::getStatus, slaTrackedStatusNames())
                 .eq(RepairTicket::getAssignedWorkerId, currentUser.getId())
                 .isNotNull(RepairTicket::getSlaDeadlineAt)
                 .lt(RepairTicket::getSlaDeadlineAt, now));
@@ -443,7 +446,8 @@ public class TicketService {
 
     private LambdaQueryWrapper<RepairTicket> applyQualityFilters(LambdaQueryWrapper<RepairTicket> wrapper, Boolean overdue, Boolean urged) {
         if (Boolean.TRUE.equals(overdue)) {
-            wrapper.in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames())
+            // 超时筛选按 SLA 口径（含已退回），见 slaTrackedStatusNames()
+            wrapper.in(RepairTicket::getStatus, slaTrackedStatusNames())
                     .isNotNull(RepairTicket::getSlaDeadlineAt)
                     .lt(RepairTicket::getSlaDeadlineAt, LocalDateTime.now());
         }
@@ -670,6 +674,19 @@ public class TicketService {
                 .in(RepairTicket::getStatus, TicketStateMachine.activeStatusNames());
     }
 
+    /**
+     * SLA 计时口径的工单状态：进行中的四个状态 + 已退回。
+     *
+     * <p>「已退回」的工单同样躺在管理员那里等重新派单，SLA 事实上已经违约，必须计入超时，
+     * 否则最该督办的工单会被灰色标签藏起来；但它不能加进 {@code TicketStateMachine.ACTIVE_STATUSES}，
+     * 因为那个集合还被派单评分用来统计维修员「当前活跃工单数」，改动会连带影响派单排序。
+     */
+    private Set<String> slaTrackedStatusNames() {
+        Set<String> statuses = new java.util.LinkedHashSet<>(TicketStateMachine.activeStatusNames());
+        statuses.add(TicketStatus.RETURNED.name());
+        return statuses;
+    }
+
     private LocalDateTime defaultSlaDeadline(TicketPriority priority, LocalDateTime baseTime) {
         LocalDateTime base = baseTime == null ? LocalDateTime.now() : baseTime;
         return switch (priority) {
@@ -713,7 +730,9 @@ public class TicketService {
         if (ticket.getSlaDeadlineAt() == null) {
             return false;
         }
-        if (!TicketStateMachine.isActive(parseStatus(ticket.getStatus(), "ticket-sla-overdue"))) {
+        TicketStatus status = parseStatus(ticket.getStatus(), "ticket-sla-overdue");
+        // 与列表筛选、待办统计保持一致：进行中 + 已退回 都参与 SLA 计时
+        if (!TicketStateMachine.isActive(status) && status != TicketStatus.RETURNED) {
             return false;
         }
         return ticket.getSlaDeadlineAt().isBefore(LocalDateTime.now());
