@@ -136,7 +136,44 @@ Select-String -Path CampusRepairApi\target\demo-api.log -Pattern 'rag rerank app
 
 ## 7. 演示数据现状（2026-09-11 实测）
 
-- 今日新增 3 条演示工单（含 1 条带图 + 配电箱漏电风险场景），AI 预分析状态均为 `SUCCESS`，其中一条已走完「派单→接单→处理→评价」全流程并自动沉淀出知识草稿
-- 知识库：14 篇文档 / 191 个切片，全部同步到 Milvus
-- 评测集：`campus-repair-builtin`（8 条）、`campus-repair-hybrid`（24 条）、`campus-repair-hybrid-v2`（22 条，零字面重叠）
-- 待办：待审核 8 / 退回 1 / 超时 11 / 督办 3 / 待确认 2
+**33 条工单**，覆盖 7 种状态 / 5 个分类 / 9 个地点 / 4 名学生 / 3 名维修员，提交时间铺开在近 15 天（08-22 ~ 09-11），列表每页 10 条共 4 页（可现场演示翻页）。
+
+| 状态 | 数量 | 高 | 中 | 低 |
+| --- | --- | --- | --- | --- |
+| 待审核 PENDING_REVIEW | 8 | — | — | 8 |
+| 处理中 PROCESSING | 8 | 2 | 2 | 4 |
+| 待接单 ASSIGNED | 7 | — | 5 | 2 |
+| 已完成 COMPLETED | 4 | 1 | 1 | 2 |
+| 待确认 WAITING_CONFIRM | 4 | 2 | 2 | — |
+| 已驳回 REJECTED | 1 | — | — | 1 |
+| 已退回 RETURNED | 1 | — | 1 | — |
+
+配套数据：流转记录 89 条、AI 预分析成功 47 条、学生评价 4 条（均分 4.8）、**知识草稿 4 条**、报修图片 8 张、维修后结果图 2 张、督办 2 条。
+
+其余：知识库 14 篇文档 / 196 个切片全部同步 Milvus；公告 4 条（其中 2 条带有效期）；评测集 3 套（8 / 24 / 22 条）。
+
+### 7.1 演示数据的重建方式
+
+```powershell
+# ① 主脚本：用 test-img 的「维修前/后」对比图造 7 条重点工单（含 AI 分析、知识草稿）
+pwsh tools/seed-demo-data.ps1
+
+# ② 批量脚本：按规格文件再造一批（状态/优先级/时间铺开，凑出分页与超时样本）
+pwsh tools/seed-demo-bulk.ps1
+pwsh tools/seed-demo-bulk.ps1 -SkipAi -NoBackdate   # 不调 AI、不打散时间
+pwsh tools/seed-demo-bulk.ps1 -SpecFile backup/extra-specs.json  # 单独补几条
+```
+
+规格文件 `tools/demo-tickets-bulk.json` 可直接编辑增删工单，字段含义见脚本头部注释。
+
+**重置为干净状态**（保留账号/分类/地点/知识库/评测集）：
+
+```sql
+DELETE FROM repair_ticket_flow; DELETE FROM repair_assignment; DELETE FROM repair_evaluation;
+DELETE FROM repair_ai_analysis; DELETE FROM ai_task_record; DELETE FROM rag_knowledge_draft;
+DELETE FROM repair_ticket; DELETE FROM file_metadata;
+```
+
+> 造数据时踩过的坑（脚本注释里有说明）：PowerShell 单元素数组会被解包成标量导致后端 400、
+> 12005 周师傅的账号是 `worker03`、`ASSIGNED` 不该调接单、**结果图必须在「处理中」状态绑定**、
+> 驳回工单不需要先派单、公告脚本重复执行会产生重复数据。
