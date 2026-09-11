@@ -116,12 +116,14 @@ public class RagEvaluationService {
             long latencyMs = Math.max((System.nanoTime() - startedAt) / 1_000_000, 0);
             totalLatencyMs += latencyMs;
 
+            Set<Long> expectedChunkIds = new LinkedHashSet<>(datasetService.readLongList(evalCase.getExpectedChunkIds()));
             Set<Long> expectedDocIds = new LinkedHashSet<>(datasetService.readLongList(evalCase.getExpectedDocIds()));
             List<String> expectedKeywords = datasetService.readStringList(evalCase.getExpectedKeywords());
             List<RagMetricCalculator.RetrievedItem> retrievedItems = searchResult.chunks().stream()
-                    .map(chunk -> metricCalculator.item(chunk.documentId(), chunk.content()))
+                    .map(chunk -> metricCalculator.item(chunk.id(), chunk.documentId(), chunk.content()))
                     .toList();
-            RagMetricCalculator.CaseMetric metric = metricCalculator.evaluate(retrievedItems, expectedDocIds, expectedKeywords, topK);
+            RagMetricCalculator.CaseMetric metric = metricCalculator.evaluate(retrievedItems, expectedChunkIds,
+                    expectedDocIds, expectedKeywords, topK);
 
             boolean hit = answerable ? metric.hit() : !metric.hit();
             if (hit) {

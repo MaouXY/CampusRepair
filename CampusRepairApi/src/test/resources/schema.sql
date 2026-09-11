@@ -288,6 +288,7 @@ CREATE TABLE rag_eval_case (
   id BIGINT PRIMARY KEY,
   dataset_name VARCHAR(64) NOT NULL,
   question VARCHAR(500) NOT NULL,
+  expected_chunk_ids CLOB,
   expected_doc_ids CLOB,
   expected_keywords CLOB,
   answerable TINYINT NOT NULL DEFAULT 1,

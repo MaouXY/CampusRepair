@@ -18,6 +18,8 @@ public class RagEvalCase {
     private Long id;
     private String datasetName;
     private String question;
+    /** JSON 数组：期望命中的切片ID（切片级语义标注，判据与检索器解耦，优先级最高） */
+    private String expectedChunkIds;
     /** JSON 数组：期望命中的知识文档ID */
     private String expectedDocIds;
     /** JSON 数组：期望出现在命中片段里的关键词 */

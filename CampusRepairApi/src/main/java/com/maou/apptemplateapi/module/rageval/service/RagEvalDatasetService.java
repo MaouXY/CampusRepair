@@ -77,6 +77,7 @@ public class RagEvalDatasetService {
         RagEvalCase evalCase = new RagEvalCase();
         evalCase.setDatasetName(StringUtils.hasText(request.datasetName()) ? request.datasetName().trim() : DEFAULT_DATASET);
         evalCase.setQuestion(request.question().trim());
+        evalCase.setExpectedChunkIds(writeJson(request.expectedChunkIds() == null ? List.of() : request.expectedChunkIds()));
         evalCase.setExpectedDocIds(writeJson(request.expectedDocIds() == null ? List.of() : request.expectedDocIds()));
         evalCase.setExpectedKeywords(writeJson(request.expectedKeywords() == null ? List.of() : request.expectedKeywords()));
         evalCase.setAnswerable(request.answerable() == null ? 1 : normalizeAnswerable(request.answerable()));
@@ -115,6 +116,8 @@ public class RagEvalDatasetService {
             evalCase.setDatasetName(firstTextOrDefault(node, request.datasetName(), DEFAULT_DATASET,
                     "datasetName", "dataset", "dataset_name"));
             evalCase.setQuestion(question.trim());
+            evalCase.setExpectedChunkIds(writeJson(longList(node, "expectedChunkIds", "expected_chunk_ids",
+                    "gold_chunk_ids", "chunk_ids", "goldChunkIds")));
             evalCase.setExpectedDocIds(writeJson(longList(node, "expectedDocIds", "gold_doc_ids",
                     "relevant_doc_ids", "doc_ids", "goldDocIds")));
             evalCase.setExpectedKeywords(writeJson(stringList(node, "expectedKeywords", "expected_keywords",
@@ -361,7 +364,8 @@ public class RagEvalDatasetService {
 
     private RagEvalCaseResponse toResponse(RagEvalCase evalCase) {
         return new RagEvalCaseResponse(evalCase.getId(), evalCase.getDatasetName(), evalCase.getQuestion(),
-                readLongList(evalCase.getExpectedDocIds()), readStringList(evalCase.getExpectedKeywords()),
+                readLongList(evalCase.getExpectedChunkIds()), readLongList(evalCase.getExpectedDocIds()),
+                readStringList(evalCase.getExpectedKeywords()),
                 evalCase.getAnswerable(), evalCase.getTaskType(), evalCase.getCategoryId(), evalCase.getSource(),
                 evalCase.getCreatedAt());
     }

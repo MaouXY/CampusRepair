@@ -7,6 +7,7 @@ public record RagEvalCaseResponse(
         Long id,
         String datasetName,
         String question,
+        List<Long> expectedChunkIds,
         List<Long> expectedDocIds,
         List<String> expectedKeywords,
         Integer answerable,
