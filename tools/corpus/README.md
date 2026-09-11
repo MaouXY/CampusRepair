@@ -36,24 +36,85 @@ tools/corpus/
 | `.txt` / `.text` | 无 | 自动探测编码：UTF-8（含 BOM）优先，失败回退 `gb18030`（GBK 超集），最后 `utf-8(replace)` 兜底并告警 |
 | `.md` / `.markdown` | 无 | 额外识别 Markdown `#`~`######` 标题；不做 Markdown 语法清理 |
 | `.docx` / `.docm` | 无 | `zipfile` + `xml.etree` 直接解析 `word/document.xml`，按 `<w:p>` 取 `<w:t>`；`<w:tab/>` → 空格，`<w:br/>` → 换行；顺带读取 `word/header*.xml`、`word/footer*.xml` 作为“已知噪声行” |
-| `.pdf` | 可选 | 先试 `pypdf`，再试 `pdfminer.six`；**两个都没装也不会崩**，只打印中文提示并记为 skipped（退出码仍为 0，除非所有文件都失败） |
-| `.doc` / `.wps` / `.rtf` | 不支持 | 提示“请先用 Word / WPS 另存为 .docx 或 .txt”，记为 skipped |
+| `.pdf` | **零 pip** | 三条路径依次尝试：`pypdf` → `pdfminer.six` → **Word COM**（PowerShell + Microsoft Word 另存为文本）。三条都走不通才跳过并给中文建议 |
+| `.doc` / `.rtf` | **零 pip** | 直接走 Word COM 另存为文本；Word 不可用时提示“请另存为 .docx 或 .txt”并跳过 |
+| `.wps` | 不支持 | WPS 私有格式（本机也没有 WPS），提示“请另存为 .docx 或 .txt”，记为 skipped |
+
+> 也就是说：**只要装了 Microsoft Word，本脚本连 PDF 都能转，不需要 pip 装任何东西**。
+> 只有“既没装 Word、也不想装 pip 包”时，PDF 才会被跳过。
 
 ```powershell
-# PDF 需要额外安装（二选一即可；不装也能跑，只是 PDF 会被跳过）
+# 完全可选：装了 PDF 解析库会走纯 Python 路径（更快，且不启动 Word）
 D:\Anaconda3\python.exe -m pip install pypdf
 D:\Anaconda3\python.exe -m pip install pdfminer.six
 ```
 
-**本机实测**：Anaconda Python 3.12.4（`D:\Anaconda3\python.exe`），未安装 `pypdf` / `pdfminer`，
-`.txt` / `.md` / `.docx` 全部正常，PDF 走“跳过 + 提示”分支 —— 见第 6 节示例 ④。
+**本机实测环境**：Anaconda Python 3.12.4（`D:\Anaconda3\python.exe`）；
+`pypdf` / `pdfminer` **未安装**；Microsoft Word **16.0.19725.20530**（`C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`，`Word.Application` COM 可用）。
+因此本机 `.txt` / `.md` / `.docx` 走纯标准库，**`.pdf` 与 `.doc` 走 Word COM 兜底**（见第 3 节与第 7 节示例 ④）。
 
 > 控制台中文乱码时：先执行 `chcp 65001`，或在当前会话设置 `$env:PYTHONIOENCODING="utf-8"` 再运行。
 > 脚本本身会按控制台编码输出，并对无法编码的字符自动降级为 `?`，不会因为打印报错而中断。
 
 ---
 
-## 3. 参数说明
+## 3. PDF / .doc 的三条解析路径（优先级与前提条件）
+
+### `.pdf`：pypdf → pdfminer.six → Word COM
+
+| 优先级 | 路径 | 前提条件 | 行为 / 耗时 | 结果质量 |
+| --- | --- | --- | --- | --- |
+| 1 | **pypdf**（纯 Python） | `pip install pypdf` | 进程内解析，最快 | 文本型 PDF 好；扫描版提取为空 → 落到下一条 |
+| 2 | **pdfminer.six**（纯 Python） | `pip install pdfminer.six` | 进程内解析，较慢但更抗畸形 PDF | 同上 |
+| 3 | **Word COM**（无需 pip） | ① 安装 Microsoft Word（`Word.Application` COM 可注册）；② Windows PowerShell 可用；③ `HKCU\...\Word\Options` 可写（脚本只在转换 PDF 期间临时改一个键，见下） | 启动 Word 另存为 txt，单个文件约 5~15 秒 | Word 会“重排”PDF，标题层级可能被并进正文（见第 11 节），但正文文字完整 |
+
+三条都不可用时：打印中文提示（含 `pip install pypdf`）并记为该文件 **skipped**；
+只有当**所有**文件都失败时退出码才为 1。
+
+Word 兜底的具体实现（`word_convert_to_text` / `word_save_as`）：
+
+```
+Word.Application（Visible=false, DisplayAlerts=0）
+  → Documents.Open(<文件>, ConfirmConversions=$false, ReadOnly=$true)
+  → SaveAs2(<%TEMP%\corpus_convert\corpus-xxxxxxxxxx.txt>, 7)   # 7 = wdFormatUnicodeText，UTF-16LE 防乱码
+  → Close(0) → Quit(0)
+  → Python 读取该 txt（自动识别 UTF-16 BOM）→ 立即删除临时文件
+```
+
+### `.doc` / `.rtf`：Word COM 优先
+
+`.doc` 是二进制旧格式，标准库无法解析，因此直接走 Word COM 另存为 txt；
+`.rtf` 也是 Word 能可靠打开的格式，一并处理。Word 不可用（或加了 `--no-word`）时：
+打印“请先用 Word / WPS 另存为 .docx 或 .txt”并记为 skipped。
+`.wps` 不参与兜底（Word 常常打不开 WPS 私有格式）。
+
+### 为什么 PDF 转换必须临时改一个注册表键（重要）
+
+Word 打开 PDF 时会另起一个 **`PDFREFLOW.exe`** 进程，并弹出模态确认框
+（“Word 现在将把您的 PDF 转换为可编辑的 Word 文档…”）。
+这个弹窗**属于另一个进程**，`DisplayAlerts=0` 管不到它，会导致 `Documents.Open` 永久挂起
+（实测：不加处理时 120 秒超时；设置后同一文件 5.5 秒转换完成）。
+
+脚本的处理方式：
+
+1. 转换 PDF 前，用 Python 标准库 `winreg` 读取并临时写入
+   `HKCU\Software\Microsoft\Office\16.0\Word\Options\DisableConvertPdfWarning = 1`；
+2. **无论成功、失败还是超时，都会在 `finally` 里恢复原值**（原来没有这个值就删掉它）
+   —— 因为还原动作在 Python 侧而不是被超时杀掉的 PowerShell 子进程里，所以一定执行；
+3. 启动时会打印一行提示，说明这次转换临时改过、已还原；
+4. 不希望脚本碰注册表就加 `--no-word-regfix`（此时 PDF 转换可能要人工点确认，通常会走到超时并被跳过）。
+
+### 进程清理与“不影响你正在用的 Word”
+
+- 每次转换前后都会用 `tasklist` 记录 `WINWORD.EXE` / `PDFREFLOW.EXE` 的进程号，
+  转换结束后**只结束本次新产生的**进程（Word 的 `Quit` 后经常残留隐藏进程，堆积会把后续转换卡死 —— 实测踩过）；
+- 如果你在跑脚本前**已经打开了 Word**，脚本只关闭本次打开的那份文档，**不会调用 `Quit`**，
+  也不会结束你的 Word 进程（日志会提示“检测到已有 Word 在运行”）；
+- 单次调用超时会先清理残留进程再**自动重试一次**（最坏耗时 ≈ 2 × `--word-timeout`）。
+
+---
+
+## 4. 参数说明
 
 以下命令均在**项目根目录** `CampusRepair` 下执行（脚本内部只用相对路径与命令行参数，不含任何绝对路径）。
 
@@ -76,6 +137,10 @@ D:\Anaconda3\python.exe tools\corpus\convert_corpus.py --input <文件或目录>
 | `--max-chars` | | `1500` | 单条 `content` 最大字符数，超出按自然段切分并在 `title` 追加 `（续N）` |
 | `--min-header-repeat` | | `3` | 页眉页脚判定阈值：同一行出现次数 ≥ 该值且长度 < 40 视为页眉页脚 |
 | `--keep-noise` | | 关 | 关闭页码 / 页眉页脚剔除（排错时对照原文用） |
+| `--no-word` | | 关 | 禁用 Word COM 兜底（此时 PDF / `.doc` 在缺库时直接跳过） |
+| `--word-path` | | 自动探测 | 可选：指定 `WINWORD.EXE` 绝对路径。**COM 调用始终使用系统注册的 Word**，该参数用于预检、版本展示与诊断（给了它即使 `GetTypeFromProgID` 探测失败也会尝试调用；路径不存在会告警） |
+| `--word-timeout` | | `120` | Word COM 单文件转换超时秒数；超时后会清理残留进程并重试一次 |
+| `--no-word-regfix` | | 关 | 转换 PDF 时**不**临时设置 `DisableConvertPdfWarning`（默认会临时设置并立即还原） |
 | `--no-normalize-space` | | 关 | 不把制表符、全角空格、连续空格归一为单个半角空格 |
 | `--no-recursive` | | 关 | 目录输入时不递归子目录 |
 
@@ -92,7 +157,7 @@ D:\Anaconda3\python.exe tools\corpus\convert_corpus.py --input <文件或目录>
 
 ---
 
-## 4. 清洗规则（7 步，按顺序执行）
+## 5. 清洗规则（7 步，按顺序执行）
 
 1. **统一换行 + 去零宽字符**：`\r\n`、`\r` → `\n`；删除 `\u200b-\u200f`、`\u2028`、`\u2029`、`\u2060`、`\ufeff`。
 2. **去页码行**：`12`、`- 12 -`、`— 12 —`、`第 12 页`、`第 12 页 / 共 30 页`、`12/30`、`Page 12 of 30`、`共 12 页`。
@@ -113,7 +178,7 @@ D:\Anaconda3\python.exe tools\corpus\convert_corpus.py --input <文件或目录>
 
 ---
 
-## 5. 章节识别规则
+## 6. 章节识别规则
 
 标题行长度 **≤ 40 字**（超长一律当正文，避免把正文里的编号误判成标题），
 且不以 `。！？；` 结尾（以句末标点结尾的是条款正文，不是标题）。
@@ -143,7 +208,7 @@ D:\Anaconda3\python.exe tools\corpus\convert_corpus.py --input <文件或目录>
 
 ---
 
-## 6. 示例命令（含真实运行结果）
+## 7. 示例命令（含真实运行结果）
 
 ### ① 试跑示例目录（自测用，产出 `sample/expected.jsonl`）
 
@@ -213,30 +278,50 @@ D:\Anaconda3\python.exe tools\corpus\convert_corpus.py `
   --category-id 20001 --source "校园后勤维修知识库"
 ```
 
-### ④ PDF：没装解析库时的表现（本机真实输出）
+### ④ PDF / .doc 走 Word COM 兜底（本机真实输出，未装 pypdf、未装 pdfminer）
 
 ```powershell
-# 目录里放一个 gbk 编码的 txt 和一个 pdf（本机未装 pypdf/pdfminer）
-D:\Anaconda3\python.exe tools\corpus\convert_corpus.py --input "$env:TEMP\corpus_demo" --output "$env:TEMP\corpus_demo\out.jsonl" --source 示例来源 --category-id 20001
+# 目录里放一个 .doc 和一个 .pdf（由示例 docx 用 Word 另存而来）
+D:\Anaconda3\python.exe tools\corpus\convert_corpus.py `
+  --input "$env:TEMP\word_e2e\input" --output "$env:TEMP\word_e2e\out.jsonl" --source 示例来源
 ```
 
 ```
-[完成] gbk_示例.txt → 1 章节（解析：gb18030；剔除页码 0 行 / 页眉页脚 0 行；合并硬换行 0 处；docType=standard）
-[跳过] 扫描件.pdf —— PDF 解析库缺失，已跳过该文件。请任选一种方式：
-        1) pip install pypdf
-        2) pip install pdfminer.six
-        3) 先用 Word / WPS 打开 PDF，另存为 .txt 后重新运行本脚本
-      详细原因：pypdf 未安装（No module named 'pypdf'）；pdfminer.six 未安装（No module named 'pdfminer'）
+========================================================================
+文档语料转换 convert_corpus.py v1.1.0
+输入：C:\Users\...\Temp\word_e2e\input
+输出：C:\Users\...\Temp\word_e2e\out.jsonl
+========================================================================
+[信息] Word COM 兜底：可用（Word 16.0.19725.20530，C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE）
+[信息] 校园报修工单处理办法.pdf：Word COM 兜底：校园报修工单处理办法.pdf → C:\Users\...\Temp\corpus_convert\corpus-1608f71e08.txt（转换完成已删除）；为绕开 Word 的 PDF 转换确认弹窗（PDFREFLOW 的模态框会永久卡住自动化），转换期间临时设置了 HKCU\Software\Microsoft\Office\16.0\Word\Options\DisableConvertPdfWarning=1，现已还原；已结束本次新产生的 Word 进程 24792（避免隐藏进程堆积）
+[完成] 校园报修工单处理办法.pdf → 4 章节（解析：word-com(wdFormatUnicodeText/gb18030)；剔除页码 4 行 / 页眉页脚 3 行；合并硬换行 4 处；docType=policy）
+[信息] 校园报修工单处理办法（旧版）.doc：Word COM 兜底：校园报修工单处理办法（旧版）.doc → C:\Users\...\Temp\corpus_convert\corpus-3b9e28a757.txt（转换完成已删除）；已结束本次新产生的 Word 进程 55692（避免隐藏进程堆积）
+[完成] 校园报修工单处理办法（旧版）.doc → 6 章节（解析：word-com(wdFormatUnicodeText/gb18030)；剔除页码 4 行 / 页眉页脚 3 行；合并硬换行 5 处；docType=policy）
 ------------------------------------------------------------------------
 汇总
-  处理文件数    : 2（成功 1，跳过 1）
-  跳过文件数    : 1（扫描件.pdf）
-  输出章节数    : 1
-  平均字符数    : 21.0
-  ...
+  处理文件数    : 2（成功 2，跳过 0）
+  跳过文件数    : 0
+  输出章节数    : 10
+  平均字符数    : 78.5
+  总字符数      : 785
+  输出文件      : C:\Users\...\Temp\word_e2e\out.jsonl
+------------------------------------------------------------------------
 ```
 
-退出码 `0`（有成功文件就不算失败）；GBK 文件被自动识别为 `gb18030`。
+退出码 `0`；`%TEMP%\corpus_convert\` 下的临时 txt 已删除、目录已回收，
+注册表回到调用前状态（原来没有 `DisableConvertPdfWarning` 就删掉它），没有残留 `WINWORD.EXE` / `PDFREFLOW.exe`。
+
+把 Word 兜底关掉（`--no-word`）时同一份输入的表现：
+
+```
+[信息] Word COM 兜底：已通过 --no-word 禁用
+[跳过] 校园报修工单处理办法.pdf —— PDF 解析库缺失（pip install pypdf 或 pdfminer.six 可避免这一提示）。
+      详细原因：pypdf 未安装（No module named 'pypdf'）；pdfminer.six 未安装（No module named 'pdfminer'）
+      已用 --no-word 禁用 Word 兜底；建议另存为 .txt 后重试。
+[跳过] 校园报修工单处理办法（旧版）.doc —— .doc 为旧版二进制格式，本脚本不直接解析（已用 --no-word 禁用 Word 兜底）。请先用 Word / WPS 另存为 .docx 或 .txt 后重试。
+…
+汇总  处理文件数 : 2（成功 0，跳过 2）   输出章节数 : 0     退出码 1（全部失败）
+```
 
 ### ⑤ 排错模式：不改动原文，只看切分对不对
 
@@ -256,7 +341,7 @@ D:\Anaconda3\python.exe tools\corpus\sample\selfcheck.py
 
 ---
 
-## 7. 输出字段说明
+## 8. 输出字段说明
 
 每行一个 JSON 对象，共 11 个字段（顺序固定，字段名与后端 `CorpusSectionItem` 对齐）：
 
@@ -283,7 +368,7 @@ D:\Anaconda3\python.exe tools\corpus\sample\selfcheck.py
 
 ---
 
-## 8. 与后端导入接口对接
+## 9. 与后端导入接口对接
 
 后端接口（已与仓库实现核对）：
 
@@ -345,9 +430,9 @@ for i in range(0, len(docs), BATCH_SIZE):
 
 ---
 
-## 9. 自测：怎么验证的
+## 10. 自测：怎么验证的
 
-自测脚本 `tools/corpus/sample/selfcheck.py`（只用标准库，91 项断言，全部通过）覆盖三类：
+自测脚本 `tools/corpus/sample/selfcheck.py`（只用标准库，**109 项断言，全部通过**，本机耗时约 32 秒）覆盖四类：
 
 **① 单元测试**（直接 `import` 主脚本调用内部函数）
 
@@ -373,17 +458,57 @@ for i in range(0, len(docs), BATCH_SIZE):
   再用自测**独立实现**的页码正则扫一遍全部 `content`，确认没有残留纯页码行。
 - docx 的 tab / br、txt 的硬换行合并、`附录A` 拆成 2 条且第 2 条 `title` 以 `（续2）` 结尾、`sectionTitle` 一致。
 
-**③ 优雅降级**（临时目录里造 `.doc` / 假 `.pdf`）
+**③ 优雅降级**（临时目录里造 `.doc` / 假 `.pdf`，统一加 `--no-word`，不依赖 Word）
 
 - 正常文件 + `.doc` → 退出码 `0`，打印“请先另存为 .docx / .txt”，正常文件仍产出语料。
 - **只有一个 `.doc`**（全部失败）→ 退出码 `1`。
 - 只有一个 `.pdf` 且本机没装解析库 → 退出码 `1`、打印 `pip install pypdf` / `pdfminer.six` 提示、**不抛异常**。
+- 加 `--no-word` 时会明确提示“已用 --no-word 禁用 Word 兜底”。
+
+**④ Word COM 兜底**（真实调用 PowerShell + Word，把示例 docx 另存成 `.doc` / `.pdf` 当夹具）
+
+- 找到 PowerShell 可执行文件（本机 `powershell.exe` 不在 PATH，脚本按候选绝对路径找到了它）。
+- 用 `SaveAs2` 生成 `.doc`（fmt 0）与 `.pdf`（fmt 17）夹具 → 两个文件都被 Word 兜底解析出章节，
+  日志里出现 `解析：word-com(wdFormatUnicodeText/...)`。
+- `--word-path` 传真实 `WINWORD.EXE` 路径可正常转换。
+- Word txt 里的分页符 `\x0c`、单元格标记 `\x07`、软换行 `\x0b` 已被清理。
+- **`DisableConvertPdfWarning` 注册表值在转换前后完全一致**（用 `winreg` 读回比对，确认“临时改 + 还原”）。
+- `%TEMP%\corpus_convert` 下没有残留临时 txt；**没有残留 `WINWORD.EXE` / `PDFREFLOW.exe` 进程**（转换前后用 `tasklist` 比对 PID）。
+- `--no-word` 时 `.doc`/`.pdf` 全部跳过、退出码 `1`，并给出“另存为 .docx / .txt”的建议。
+- 若机器上检测不到 Word，这一节打印提示并自动跳过（不会把自测跑红）。
 
 实际结果：
 
 ```
 ========================================================================
-自测结果：通过 91 项，失败 0 项
+tools/corpus 自测 selfcheck.py
+被测脚本：F:\javaWeb\毕设接单\CampusRepair\tools\corpus\convert_corpus.py
+示例目录：F:\javaWeb\毕设接单\CampusRepair\tools\corpus\sample
+========================================================================
+…
+== 端到端测试 3：Word COM 兜底（PDF / .doc，无需 pip） ==
+  [PASS] 找到 PowerShell 可执行文件
+  [信息] Word COM 探测：可用（Word 16.0.19725.20530，C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE）
+  [PASS] 用 Word 生成 .doc 夹具
+  [PASS] 用 Word 生成 .pdf 夹具
+  [信息] --word-path C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE
+  [PASS] Word 兜底路径退出码为 0
+  [PASS] 日志显示使用了 word-com 解析引擎
+  [PASS] PDF 转换会绕开确认弹窗（临时设置注册表并还原）
+  [PASS] Word 兜底至少产出一条语料
+  [PASS] .doc 经 Word 兜底解析出章节
+  [PASS] .pdf 经 Word 兜底解析出章节
+  [PASS] Word 兜底结果 charCount 正确
+  [PASS] Word txt 的分页符 / 单元格标记等控制字符已清理
+  [PASS] DisableConvertPdfWarning 注册表值已还原到调用前状态
+  [PASS] %TEMP%\corpus_convert 下的临时 txt 已删除
+  [PASS] 没有残留的 WINWORD / PDFREFLOW 进程
+  [PASS] --no-word 时 .doc/.pdf 全部失败退出码为 1
+  [PASS] --no-word 提示清楚
+  [PASS] --no-word 时给出“另存为 .docx/.txt”的中文建议
+
+========================================================================
+自测结果：通过 109 项，失败 0 项
 ========================================================================
 ```
 
@@ -426,12 +551,24 @@ D:\Anaconda3\python.exe -c "import json,io; rows=[json.loads(l) for l in io.open
 
 ---
 
-## 10. 已知限制与常见问题
+## 11. 已知限制与常见问题
 
 - **页码误删的风险**：连续 1~4 位纯数字的独立行会被当页码删掉。若正文里有“单独成行的数字”（如表格里只剩一个数量值），
   用 `--keep-noise` 先看原文，或改用 `--min-header-repeat` 调整。
-- **扫描版（图片型）PDF 无法解析**：需要先 OCR，或用 Word/WPS 转成 txt 再跑。
-- **`.doc` 旧格式不支持**：Word 另存为 `.docx` 后再跑；`.wps`、`.rtf` 同理。
+- **Word 读 PDF 会“重排”**：Word 把 PDF 转成可编辑文档时按自己的理解重建段落，
+  原本独立成行的标题常常被并进正文（实测同一份 docx 导出 PDF 后再转回文本，
+  章节数从 6 条变成 4 条，`第一章 总则一、适用范围本办法适用于…` 粘成一行）。
+  文字内容不丢，但**标题层级会变差**。要高质量切分，优先喂 `.docx` / `.txt` 原文；
+  要求更高时用 `pip install pypdf` 走纯 Python 路径。
+- **Word 兜底的耗时**：每个 PDF / `.doc` 约 5~15 秒；单个文件超时后会自动清理残留进程并重试一次，
+  最坏耗时 ≈ 2 × `--word-timeout`（默认 240 秒）；批量转换建议只对少量 PDF 使用，或先装 pypdf。
+- **Word 兜底会临时改一个注册表键**（仅 PDF）：`HKCU\...\Word\Options\DisableConvertPdfWarning`，
+  转换后立即还原（详见第 3 节）。不接受改注册表就加 `--no-word-regfix`，或直接 `--no-word`。
+- **脚本运行时不要手工编辑 Word 文档**：脚本不会 Quit 你已经打开的 Word
+  （会检测到，只关闭自己打开的文档），但 Word 是单实例自动化服务器，
+  万一中途被强制中断，请检查任务管理器里是否有残留的 `WINWORD.EXE` / `PDFREFLOW.exe`。
+- **扫描版（图片型）PDF 无法解析**：需要先 OCR；Word 也只会得到空文本（脚本会提示“转换后 txt 为空”）。
+- **`.wps` 不支持**：WPS 私有格式，请另存为 `.docx` / `.txt`（本机没装 WPS，未做验证）。
 - **PDF 的换行很碎**：PDF 提取出来的文本常按视觉行断行，本脚本的硬换行合并能处理大部分情况，
   但双栏排版、表格会被压成流水文本；要求高的规范建议用 docx / txt 原文。
 - **条款密集的标准**：`x.y.z` 条款行若以 `。` 结尾会作为正文保留（不切分），
@@ -439,15 +576,16 @@ D:\Anaconda3\python.exe -c "import json,io; rows=[json.loads(l) for l in io.open
   `RagCorpusSplitter` 的二次切分能力，或把条款行改写成“编号 + 标题”形式。
 - **`--doc-name` 多文件**：多文件输入时所有记录会共用同一个文档名，脚本会打警告，建议省略该参数。
 - **重复运行幂等**：同一个输入 + 同一组参数 → 输出逐字节一致（自测里有这条断言），便于重跑与 diff。
+  例外：Word 兜底的 PDF 结果取决于 Word 版本与重排行为，换机器可能不同。
 
 ---
 
-## 11. 相关文件
+## 12. 相关文件
 
 | 文件 | 说明 |
 | --- | --- |
-| `tools/corpus/convert_corpus.py` | 转换脚本（标准库实现，PDF 为可选增强） |
+| `tools/corpus/convert_corpus.py` | 转换脚本（核心为标准库；PDF 走 pypdf → pdfminer → Word COM 三条路径） |
 | `tools/corpus/sample/make_sample_docx.py` | 用 `zipfile` 现场生成最小 docx（含 `<w:tab/>`、`<w:br/>`、页眉页脚部件） |
-| `tools/corpus/sample/selfcheck.py` | 自测脚本（91 项断言，退出码即结果） |
+| `tools/corpus/sample/selfcheck.py` | 自测脚本（109 项断言，退出码即结果；含 Word COM 兜底端到端测试） |
 | `tools/corpus/sample/expected.jsonl` | 示例目录的期望输出（25 行） |
 | `CampusRepairApi/.../module/rag/dto/CorpusSectionItem.java` | 后端对应的导入 DTO（字段以此为准） |

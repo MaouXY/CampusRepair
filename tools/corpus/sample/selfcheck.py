@@ -7,7 +7,10 @@
      标题识别与层级、清洗（页码 / 页眉页脚 / 硬换行合并）、章节切分、超长分块
   2) 端到端：真实调用 convert_corpus.py 跑一遍 sample 目录，逐行 json.loads 校验，
      并与 expected.jsonl 做逐行一致性比对
-  3) 优雅降级：.doc / .pdf 在缺少解析库时应“跳过 + 退出码正确”，不崩溃
+  3) 优雅降级：.doc / .pdf 在缺少解析库且禁用 Word 兜底时应“跳过 + 退出码正确”，不崩溃
+  4) Word COM 兜底：真实调用 PowerShell + Word，把 .doc / .pdf 另存为 txt（第 3 条路径），
+     并校验注册表临时改动已还原、临时 txt 已删除、无残留 WINWORD / PDFREFLOW 进程
+     （检测不到 Word 时自动跳过这一节）
 
 用法（在项目根目录执行）：
   python tools/corpus/sample/selfcheck.py
@@ -36,6 +39,9 @@ SOURCE = "示例来源"
 MAX_CHARS = 1500
 RECORD_KEYS = ["title", "source", "standardNo", "docType", "docVersion", "effectiveDate",
                "categoryId", "sectionTitle", "sectionLevel", "content", "charCount"]
+
+# 动态 import 会被解释器写成 __pycache__/*.pyc，落在交付目录里不干净，这里关掉字节码落地
+sys.dont_write_bytecode = True
 
 
 class Checker:
@@ -331,7 +337,7 @@ def mod_looks_like_page_number(line: str) -> bool:
 
 
 def degradation_tests(c: Checker) -> None:
-    c.section("端到端测试 2：.doc / .pdf 优雅降级与退出码")
+    c.section("端到端测试 2：.doc / .pdf 优雅降级与退出码（--no-word，不依赖 Word）")
     tmpdir = Path(tempfile.mkdtemp(prefix="corpus_degrade_"))
     try:
         # 1) 一个正常 txt + 一个 .doc → 应跳过 doc、正常输出、退出码 0
@@ -340,7 +346,7 @@ def degradation_tests(c: Checker) -> None:
         (mixed / "正常文档.txt").write_text("1 总则\n维护单位应建立设备台账。\n", encoding="utf-8")
         (mixed / "旧版文档.doc").write_bytes(b"\xd0\xcf\x11\xe0old binary doc stub")
         mixed_out = tmpdir / "mixed.jsonl"
-        proc = run_cli(mixed, mixed_out)
+        proc = run_cli(mixed, mixed_out, ["--no-word"])
         c.check(proc.returncode == 0, "有成功文件时退出码为 0（.doc 只跳过）", proc.returncode)
         c.check("跳过" in proc.stdout and "另存为" in proc.stdout, "打印了 .doc 的中文转换提示", proc.stdout[-300:])
         c.check(mixed_out.exists() and len(mixed_out.read_text(encoding="utf-8").strip().splitlines()) == 1,
@@ -350,7 +356,7 @@ def degradation_tests(c: Checker) -> None:
         only_doc = tmpdir / "only_doc"
         only_doc.mkdir()
         (only_doc / "旧版文档.doc").write_bytes(b"\xd0\xcf\x11\xe0old binary doc stub")
-        proc = run_cli(only_doc, tmpdir / "only_doc.jsonl")
+        proc = run_cli(only_doc, tmpdir / "only_doc.jsonl", ["--no-word"])
         c.check(proc.returncode == 1, "全部文件都失败时退出码为 1", proc.returncode)
 
         # 3) .pdf：缺少 pypdf/pdfminer 时应跳过并给出 pip 提示
@@ -365,14 +371,98 @@ def degradation_tests(c: Checker) -> None:
         only_pdf = tmpdir / "only_pdf"
         only_pdf.mkdir()
         (only_pdf / "示例规范.pdf").write_bytes(b"%PDF-1.4\n% stub pdf, not a real document\n")
-        proc = run_cli(only_pdf, tmpdir / "only_pdf.jsonl")
+        proc = run_cli(only_pdf, tmpdir / "only_pdf.jsonl", ["--no-word"])
         if not has_pdf_lib:
             c.check(proc.returncode == 1, "只有 PDF 且解析库缺失时退出码为 1（不崩溃）", proc.returncode)
             c.check("pip install pypdf" in proc.stdout and "pdfminer" in proc.stdout,
                     "打印了中文 pip 安装提示", proc.stdout[-400:])
+            c.check("--no-word" in proc.stdout, "禁用 Word 兜底时明确提示已禁用", proc.stdout[-200:])
         else:
             c.check(proc.returncode in (0, 1), "本机已安装 PDF 解析库，仅校验不崩溃", proc.returncode)
             print("  [信息] 本机检测到 pypdf / pdfminer.six，跳过“缺库”断言")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def word_fallback_tests(c: Checker, mod) -> None:
+    """Word COM 兜底（PDF / .doc 的第三条路径）端到端测试。
+
+    本机没有 pypdf / pdfminer，因此这里正好验证 “PowerShell + Word COM 另存为 txt” 这条链路。
+    检测不到 Word 时打印提示并跳过（不判失败），保证自测在无 Word 的机器上依然是绿的。
+    """
+    c.section("端到端测试 3：Word COM 兜底（PDF / .doc，无需 pip）")
+    ps = mod.find_powershell()
+    c.check(bool(ps) and Path(ps).is_file(), "找到 PowerShell 可执行文件", ps)
+    info = mod.word_info()
+    print("  [信息] Word COM 探测：%s" % info.get("message"))
+    if not info.get("available"):
+        print("  [信息] 本机未检测到 Word.Application COM，跳过 Word 兜底端到端测试")
+        return
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="corpus_word_"))
+    try:
+        src_docx = SAMPLE_DIR / DOCX_NAME
+        if not src_docx.exists():
+            print("  [信息] 示例 docx 不存在，跳过 Word 兜底端到端测试")
+            return
+
+        # 1) 造夹具：用 Word 把示例 docx 另存为 .doc 与 .pdf（同时也验证了另存为接口）
+        indir = tmpdir / "input"
+        indir.mkdir()
+        doc_file = indir / "校园报修工单处理办法（旧版）.doc"
+        pdf_file = indir / "校园报修工单处理办法.pdf"
+        r_doc = mod.word_save_as(src_docx, doc_file, mod.WD_FORMAT_DOCUMENT97, timeout=180)
+        r_pdf = mod.word_save_as(src_docx, pdf_file, mod.WD_FORMAT_PDF, timeout=180)
+        ok_fixtures = c.check(r_doc.ok and doc_file.is_file(), "用 Word 生成 .doc 夹具", r_doc.message[:200])
+        c.check(r_pdf.ok and pdf_file.is_file(), "用 Word 生成 .pdf 夹具", r_pdf.message[:200])
+        if not ok_fixtures:
+            print("  [信息] 无法生成 Word 夹具，跳过后续 Word 端到端测试")
+            return
+
+        tmp_conv_dir = Path(tempfile.gettempdir()) / "corpus_convert"
+        reg_before = mod._reg_read_pdf_warning()
+        procs_before = mod._snapshot_word_pids()
+        exe = str(info.get("exe") or "")
+
+        # 2) 默认（Word 兜底开启）+ --word-path：.doc 与 .pdf 都应被解析出章节
+        out = tmpdir / "word.jsonl"
+        extra = ["--word-path", exe] if exe and Path(exe).is_file() else []
+        proc = run_cli(indir, out, extra)
+        print("  [信息] --word-path %s" % (exe if extra else "（未指定）"))
+        c.check(proc.returncode == 0, "Word 兜底路径退出码为 0", proc.returncode)
+        c.check("word-com" in proc.stdout, "日志显示使用了 word-com 解析引擎", proc.stdout[-500:])
+        c.check("DisableConvertPdfWarning" in proc.stdout or "PDF 转换确认弹窗" in proc.stdout,
+                "PDF 转换会绕开确认弹窗（临时设置注册表并还原）", proc.stdout[-700:])
+        rows = []
+        if out.exists():
+            rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+        c.check(len(rows) > 0, "Word 兜底至少产出一条语料", len(rows))
+        titles = [r["title"] for r in rows]
+        c.check(any("旧版" in t for t in titles), ".doc 经 Word 兜底解析出章节", titles[:3])
+        c.check(any("旧版" not in t for t in titles), ".pdf 经 Word 兜底解析出章节", titles[:3])
+        c.check(all(r["charCount"] == len(r["content"]) for r in rows), "Word 兜底结果 charCount 正确")
+        c.check(not any(ch in c_["content"] for c_ in rows for ch in ("\x0c", "\x07", "\x0b")),
+                "Word txt 的分页符 / 单元格标记等控制字符已清理")
+
+        # 3) PDF 通道必须临时改注册表且必须还原
+        reg_after = mod._reg_read_pdf_warning()
+        c.check(reg_after == reg_before, "DisableConvertPdfWarning 注册表值已还原到调用前状态",
+                "before=%s after=%s" % (reg_before, reg_after))
+
+        # 4) 临时 txt 已删除、无残留 Word / PDFREFLOW 进程
+        leftovers = sorted(p.name for p in tmp_conv_dir.iterdir()) if tmp_conv_dir.is_dir() else []
+        c.check(not [n for n in leftovers if n.startswith("corpus-")],
+                "%TEMP%\\corpus_convert 下的临时 txt 已删除", leftovers)
+        procs_after = mod._snapshot_word_pids()
+        new_pids = sorted(set().union(*procs_after.values()) - set().union(*procs_before.values()))
+        c.check(not new_pids, "没有残留的 WINWORD / PDFREFLOW 进程", new_pids)
+
+        # 5) --no-word：两条兜底路径都应关闭
+        out2 = tmpdir / "noword.jsonl"
+        proc2 = run_cli(indir, out2, ["--no-word"])
+        c.check(proc2.returncode == 1, "--no-word 时 .doc/.pdf 全部失败退出码为 1", proc2.returncode)
+        c.check("已用 --no-word 禁用 Word 兜底" in proc2.stdout, "--no-word 提示清楚", proc2.stdout[-400:])
+        c.check("另存为" in proc2.stdout, "--no-word 时给出“另存为 .docx/.txt”的中文建议")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -396,6 +486,7 @@ def main() -> int:
     unit_tests(mod, checker)
     end_to_end_tests(checker)
     degradation_tests(checker)
+    word_fallback_tests(checker, mod)
 
     print("\n" + "=" * 72)
     print("自测结果：通过 %d 项，失败 %d 项" % (checker.passed, len(checker.failed)))

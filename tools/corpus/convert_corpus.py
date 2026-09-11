@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
@@ -170,6 +171,7 @@ class WordFallback:
     enabled: bool = True
     word_path: Optional[str] = None
     timeout: int = WORD_DEFAULT_TIMEOUT
+    reg_fix: bool = True          # 转换 PDF 时临时设置 DisableConvertPdfWarning 并还原
 
 
 def decode_bytes(data: bytes, encoding: str = "auto") -> Tuple[str, str, Optional[str]]:
@@ -323,7 +325,8 @@ def read_pdf(path: Path, word: Optional["WordFallback"] = None) -> ReadResult:
     if word.enabled:
         info = word_info(word.word_path)
         if info.get("available") or (word.word_path and os.path.isfile(word.word_path)):
-            result = word_convert_to_text(path, word_path=word.word_path, timeout=word.timeout)
+            result = word_convert_to_text(path, word_path=word.word_path, timeout=word.timeout,
+                                          reg_fix=word.reg_fix)
             if result.text is not None:
                 result.meta = dict(result.meta)
                 result.meta["lib_problems"] = problems
@@ -344,7 +347,8 @@ def read_legacy(path: Path, word: Optional["WordFallback"] = None) -> ReadResult
     if word.enabled and ext in EXT_WORD_OPENABLE:
         info = word_info(word.word_path)
         if info.get("available") or (word.word_path and os.path.isfile(word.word_path)):
-            result = word_convert_to_text(path, word_path=word.word_path, timeout=word.timeout)
+            result = word_convert_to_text(path, word_path=word.word_path, timeout=word.timeout,
+                                          reg_fix=word.reg_fix)
             if result.text is not None:
                 return result
             return ReadResult(error=(
@@ -376,21 +380,80 @@ PS_CANDIDATES = (
     os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "PowerShell", "7", "pwsh.exe"),
 )
 
-# 探测 Word COM：先用 GetTypeFromProgID（很快，不会启动 Word），再取版本与安装目录
-# 输出用 | 分隔（Word 安装目录含空格，不能用空格分词）
+# 探测 Word COM：用 GetTypeFromProgID（只查 COM 注册表，不启动 Word），版本与安装目录从注册表读。
+# 输出用 | 分隔（Word 安装目录含空格，不能用空格分词）。
 PS_WORD_INFO = (
-    "$ErrorActionPreference='Stop';"
+    "$ErrorActionPreference='SilentlyContinue';"
     "$t=[Type]::GetTypeFromProgID('Word.Application');"
     "if($t -eq $null){Write-Output 'WORD-NA';exit 0};"
-    "$w=$null;"
-    "try{$w=New-Object -ComObject Word.Application;$v=$w.Version;$p='';"
-    "try{$p=[string]$w.Path}catch{};Write-Output ('WORD-OK|'+$v+'|'+$p)}"
-    "catch{Write-Output ('WORD-ERR|'+$_.Exception.Message)}"
-    "finally{if($w){try{$w.Quit(0)}catch{}}}"
+    "$dir='';"
+    "$o=Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Office\\16.0\\Word\\Options' -Name PROGRAMDIR;"
+    "if($o){$dir=[string]$o.PROGRAMDIR};"
+    "$v='';"
+    "$c=Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Office\\ClickToRun\\Configuration' -Name VersionToReport;"
+    "if($c){$v=[string]$c.VersionToReport};"
+    "Write-Output ('WORD-OK|'+$v+'|'+$dir)"
 )
 
+# Word 的 PDF 重排（PDF Reflow）会另起一个 PDFREFLOW.exe 进程并弹出模态确认框
+# （“Word 现在将把您的 PDF 转换为可编辑的 Word 文档…”），该弹窗由另一个进程创建，
+# DisplayAlerts=0 无法抑制，会把 Documents.Open 永久卡住（实测 Word 16.0 必现）。
+# 官方做法是置 HKCU\...\Word\Options\DisableConvertPdfWarning=1；
+# 本脚本只在转换 PDF 期间临时设置，并在 Python 侧（winreg）保证还原 —— 即使子进程被超时杀掉也能还原。
+REG_WORD_OPTIONS_SUBKEY = r"Software\Microsoft\Office\16.0\Word\Options"
+REG_PDF_WARNING_VALUE = "DisableConvertPdfWarning"
+WORD_PROCESS_NAMES = ("WINWORD.EXE", "PDFREFLOW.EXE")
 _PS_CACHE: Dict[str, Optional[str]] = {}
 _WORD_INFO_CACHE: Dict[str, Dict[str, object]] = {}
+
+
+def _reg_read_pdf_warning() -> Tuple[bool, Optional[int]]:
+    """读取 DisableConvertPdfWarning 的当前状态：返回 (是否存在, 旧值)。"""
+    try:
+        import winreg  # 仅 Windows 标准库
+    except ImportError:
+        return False, None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_WORD_OPTIONS_SUBKEY) as key:
+            try:
+                value, _kind = winreg.QueryValueEx(key, REG_PDF_WARNING_VALUE)
+                return True, int(value)
+            except FileNotFoundError:
+                return False, None
+    except OSError:
+        return False, None
+
+
+def _reg_set_pdf_warning(value: int) -> bool:
+    try:
+        import winreg
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_WORD_OPTIONS_SUBKEY, 0,
+                                winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, REG_PDF_WARNING_VALUE, 0, winreg.REG_DWORD, int(value))
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def _reg_restore_pdf_warning(present: bool, old: Optional[int]) -> bool:
+    """把注册表恢复到调用前的状态：原来有值就写回，原来没有就删掉。"""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_WORD_OPTIONS_SUBKEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if present and old is not None:
+                winreg.SetValueEx(key, REG_PDF_WARNING_VALUE, 0, winreg.REG_DWORD, int(old))
+            else:
+                try:
+                    winreg.DeleteValue(key, REG_PDF_WARNING_VALUE)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        return False
 
 
 def find_powershell() -> Optional[str]:
@@ -452,10 +515,9 @@ def word_info(word_path: Optional[str] = None) -> Dict[str, object]:
         if word_path and os.path.isfile(word_path):
             exe = word_path                      # 用户指定优先展示
         info.update(available=True, version=version, exe=exe)
-        info["message"] = "可用（Word %s%s）" % (version, "，" + exe if exe else "")
+        info["message"] = "可用（Word %s%s）" % (version or "16.x", "，" + exe if exe else "")
     else:
-        detail = out.split("|", 1)[1].strip() if out.startswith("WORD-ERR") and "|" in out else ""
-        info["message"] = "不可用：未检测到 Word.Application COM 组件%s" % ("（" + detail + "）" if detail else "")
+        info["message"] = "不可用：未检测到 Word.Application COM 组件"
         if word_path:
             if os.path.isfile(word_path):
                 info["message"] += "；--word-path 显示的 WINWORD.EXE 存在（%s），仍会尝试调用" % word_path
@@ -469,17 +531,85 @@ def word_com_available(word_path: Optional[str] = None) -> bool:
     return bool(word_info(word_path).get("available"))
 
 
+@dataclass
+class WordRunResult:
+    ok: bool
+    message: str = ""
+    notes: List[str] = field(default_factory=list)
+    killed_pids: List[int] = field(default_factory=list)
+
+
+def _snapshot_word_pids() -> Dict[str, set]:
+    """用 tasklist 记录当前 WINWORD / PDFREFLOW 进程号。
+
+    只清理“本次调用新产生的”进程，用户自己正在用的 Word 不会被杀、也不会被 Quit。
+    """
+    snapshot: Dict[str, set] = {}
+    for name in WORD_PROCESS_NAMES:
+        pids = set()
+        try:
+            proc = subprocess.run(["tasklist", "/FI", "IMAGENAME eq %s" % name, "/FO", "CSV", "/NH"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+            text = (proc.stdout or b"").decode("gb18030", "replace")
+            for line in text.splitlines():
+                m = re.match(r'^"[^"]+","(\d+)"', line.strip())
+                if m:
+                    pids.add(int(m.group(1)))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        snapshot[name] = pids
+    return snapshot
+
+
+def _kill_new_word_pids(before: Dict[str, set]) -> List[int]:
+    """结束本次新产生的 Word / PDFREFLOW 进程，避免隐藏进程堆积把后续转换卡死。"""
+    keep = set().union(*before.values()) if before else set()
+    current = _snapshot_word_pids()
+    now = set().union(*current.values()) if current else set()
+    killed: List[int] = []
+    for pid in sorted(now - keep):
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            killed.append(pid)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return killed
+
+
 def word_save_as(src: Path, out: Path, fmt: int = WD_FORMAT_UNICODE_TEXT, *,
-                 word_path: Optional[str] = None, timeout: int = WORD_DEFAULT_TIMEOUT) -> Tuple[bool, str]:
-    """用 Word COM 把 src 另存为 out（fmt 见 wdSaveFormat）。返回 (是否成功, 说明)。"""
+                 word_path: Optional[str] = None, timeout: int = WORD_DEFAULT_TIMEOUT,
+                 reg_fix: bool = True) -> WordRunResult:
+    """用 Word COM 把 src 另存为 out（fmt 见 wdSaveFormat）。
+
+    要点：
+      * PowerShell 用 -Command 调用（命令行是 UTF-16，中文路径不会乱码；写成 .ps1 文件会被
+        Windows PowerShell 按 ANSI 读取而乱码）；
+      * 打开 PDF 时先在 Python 侧（winreg）临时置 DisableConvertPdfWarning=1，转换后无论成功、
+        失败还是超时都还原，绕开 PDFREFLOW 的模态弹窗；
+      * 调用前若已有 Word 在运行（用户自己在用），只关闭本次打开的文档、不调用 Quit，
+        也不结束该进程；只清理本次新产生的 WINWORD / PDFREFLOW 进程。
+    """
     src, out = Path(src), Path(out)
     ps = find_powershell()
     if ps is None:
-        return False, "找不到 PowerShell（已尝试 powershell.exe / pwsh.exe）"
+        return WordRunResult(False, "找不到 PowerShell（已尝试 powershell.exe / pwsh.exe）")
 
-    script = (
+    before_pids = _snapshot_word_pids()
+    pre_word = len(before_pids.get("WINWORD.EXE", ()))   # 调用前已存在的 Word 个数
+    is_pdf = src.suffix.lower() == ".pdf"
+    reg_applied = False
+    reg_old: Tuple[bool, Optional[int]] = (False, None)
+    if reg_fix and is_pdf:
+        reg_old = _reg_read_pdf_warning()
+        if reg_old[0] and reg_old[1] == 1:
+            pass                                     # 本来就是 1，不需要动
+        else:
+            reg_applied = _reg_set_pdf_warning(1)
+
+    script_tpl = (
         "$ErrorActionPreference='Stop';"
-        "$confirm=$false;$readonly=$true;$ok=$false;$err='';$doc=$null;"
+        "$confirm=$false;$readonly=$true;$ok=$false;$err='';$doc=$null;$pre=%d;"
         "$w=New-Object -ComObject Word.Application;"
         "$w.Visible=$false;$w.DisplayAlerts=0;"
         "try{"
@@ -487,26 +617,69 @@ def word_save_as(src: Path, out: Path, fmt: int = WD_FORMAT_UNICODE_TEXT, *,
         "$doc.SaveAs2(%s,%d);"
         "$doc.Close(0);$doc=$null;$ok=$true"
         "}catch{$err=$_.Exception.Message}"
-        "finally{if($doc){try{$doc.Close(0)}catch{}};if($w){try{$w.Quit(0)}catch{}}}"
+        "finally{"
+        "if($doc){try{$doc.Close(0)}catch{}};"
+        "if($w){try{if($pre -eq 0){$w.Quit(0)}else{Write-Output 'KEEP-WORD'}}catch{}}"
+        "};"
         "if($ok){Write-Output 'CONVERT-OK'}else{Write-Output ('CONVERT-FAIL: '+$err);exit 1}"
-    ) % (_ps_quote(src), _ps_quote(out), int(fmt))
+    ) % (pre_word, _ps_quote(src), _ps_quote(out), int(fmt))
+
+    def attempt() -> Tuple[WordRunResult, bool]:
+        """执行一次 Word 调用，返回 (结果, 是否超时)。"""
+        try:
+            proc = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script_tpl],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+            text = decode_bytes(proc.stdout or b"", "auto")[0].strip()
+            if proc.returncode == 0 and "CONVERT-OK" in text and out.is_file():
+                run = WordRunResult(True, text)
+            else:
+                detail = text
+                if detail.startswith("CONVERT-FAIL:"):
+                    detail = detail[len("CONVERT-FAIL:"):].strip()
+                run = WordRunResult(False, detail or ("PowerShell 退出码 %s" % proc.returncode))
+            if "KEEP-WORD" in text:
+                run.notes.append("检测到已有 Word 在运行，只关闭了本次打开的文档，未调用 Quit")
+            return run, False
+        except subprocess.TimeoutExpired:
+            return WordRunResult(False, (
+                "Word COM 调用超时（> %d 秒）。可先用 Word 打开该文件手动另存为 .docx / .txt" % timeout)), True
+        except OSError as exc:
+            return WordRunResult(False, "无法启动 PowerShell：%s" % exc), False
 
     try:
-        proc = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return False, ("Word COM 调用超时（> %d 秒）。如任务管理器里残留 WINWORD.EXE 进程，请手动结束；"
-                       "也可先用 Word 打开该文件另存为 .docx / .txt" % timeout)
-    except OSError as exc:
-        return False, "无法启动 PowerShell：%s" % exc
+        result, timed_out = attempt()
+        if not result.ok and timed_out:
+            # 超时多半是被上一次残留的 Word 实例拖住：清理干净后重试一次
+            leftovers = _kill_new_word_pids(before_pids)
+            result.notes.append("首次调用超时，已清理残留进程%s并重试一次"
+                                % (" %s" % ",".join(str(p) for p in leftovers) if leftovers else ""))
+            time.sleep(1.0)
+            result2, timed_out2 = attempt()
+            if result2.ok:
+                result2.notes = result.notes + result2.notes + ["重试成功"]
+                result, timed_out = result2, False
+            else:
+                result = result2
+                result.notes = result.notes + ["重试仍失败"]
+                timed_out = timed_out2
+    finally:
+        if reg_applied:
+            if _reg_restore_pdf_warning(*reg_old):
+                result.notes.insert(0, (
+                    "为绕开 Word 的 PDF 转换确认弹窗（PDFREFLOW 的模态框会永久卡住自动化），"
+                    "转换期间临时设置了 HKCU\\%s\\%s=1，现已还原"
+                    % (REG_WORD_OPTIONS_SUBKEY, REG_PDF_WARNING_VALUE)))
+            else:
+                result.notes.append("警告：%s 未能还原，请手动检查该注册表值"
+                                    % REG_PDF_WARNING_VALUE)
 
-    text = decode_bytes(proc.stdout or b"", "auto")[0].strip()
-    if proc.returncode == 0 and "CONVERT-OK" in text and out.is_file():
-        return True, text
-    detail = text
-    if detail.startswith("CONVERT-FAIL:"):
-        detail = detail[len("CONVERT-FAIL:"):].strip()
-    return False, (detail or "PowerShell 退出码 %s" % proc.returncode)
+    # 兜底清理：Quit 之后 Word 仍可能残留隐藏进程，堆积会卡死后续转换
+    killed = _kill_new_word_pids(before_pids)
+    result.killed_pids = killed
+    if killed:
+        result.notes.append("已结束本次新产生的 Word 进程 %s（避免隐藏进程堆积）"
+                            % ",".join(str(p) for p in killed))
+    return result
 
 
 def _word_temp_dir() -> Path:
@@ -523,7 +696,8 @@ def _strip_word_artifacts(text: str) -> str:
 
 
 def word_convert_to_text(src: Path, *, word_path: Optional[str] = None,
-                         timeout: int = WORD_DEFAULT_TIMEOUT) -> ReadResult:
+                         timeout: int = WORD_DEFAULT_TIMEOUT,
+                         reg_fix: bool = True) -> ReadResult:
     """PDF / .doc 的第三条兜底路径：调用 Word COM 另存为 Unicode txt，读完即删。"""
     info = word_info(word_path)
     if not info.get("available") and not (word_path and os.path.isfile(word_path)):
@@ -536,12 +710,13 @@ def word_convert_to_text(src: Path, *, word_path: Optional[str] = None,
     tmp_dir = _word_temp_dir()
     out_path = tmp_dir / ("corpus-%s.txt" % uuid.uuid4().hex[:10])
     try:
-        ok, message = word_save_as(src, out_path, WD_FORMAT_UNICODE_TEXT,
-                                  word_path=word_path, timeout=timeout)
-        if not ok:
+        run = word_save_as(src, out_path, WD_FORMAT_UNICODE_TEXT, word_path=word_path,
+                           timeout=timeout, reg_fix=reg_fix)
+        if not run.ok:
             return ReadResult(error=(
                 "Word COM 转换失败：%s\n"
-                "        建议：用 Word 手动打开该文件，另存为 .docx 或 .txt 后重新运行本脚本。" % message
+                "        建议：用 Word 手动打开该文件，另存为 .docx 或 .txt 后重新运行本脚本。"
+                % run.message
             ))
         data = out_path.read_bytes()
         if not data.strip():
@@ -550,9 +725,12 @@ def word_convert_to_text(src: Path, *, word_path: Optional[str] = None,
         text = _strip_word_artifacts(text)
         if not text.strip():
             return ReadResult(error="Word COM 转换后没有有效文本")
+        note = "Word COM 兜底：%s → %s（转换完成已删除）" % (src.name, out_path)
+        if run.notes:
+            note += "；" + "；".join(run.notes)
         return ReadResult(text=text, warning=warning, meta={
             "engine": "word-com(wdFormatUnicodeText/%s)" % used,
-            "word_note": "Word COM 兜底：%s → %s（转换完成已删除）" % (src.name, out_path),
+            "word_note": note,
         })
     except OSError as exc:
         return ReadResult(error="Word COM 临时文件读写失败：%s" % exc)
@@ -954,6 +1132,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="可选：WINWORD.EXE 绝对路径。COM 调用始终使用系统注册的 Word，该参数用于预检、版本展示与诊断")
     parser.add_argument("--word-timeout", type=int, default=WORD_DEFAULT_TIMEOUT,
                         help="Word COM 单文件转换超时秒数，默认 %d" % WORD_DEFAULT_TIMEOUT)
+    parser.add_argument("--no-word-regfix", dest="word_regfix", action="store_false",
+                        help=("转换 PDF 时不临时设置 DisableConvertPdfWarning（默认会临时设置并立即还原；"
+                              "不设置时 Word 的 PDF 转换确认弹窗可能使转换一直等待）"))
     parser.add_argument("--no-normalize-space", dest="normalize_space", action="store_false",
                         help="不把制表符 / 全角空格归一为普通空格")
     parser.add_argument("--no-recursive", dest="recursive", action="store_false", help="目录输入时不递归子目录")
@@ -979,7 +1160,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.word_timeout <= 0:
         print("[错误] --word-timeout 必须是正整数", file=sys.stderr)
         return 2
-    word = WordFallback(enabled=not args.no_word, word_path=args.word_path, timeout=args.word_timeout)
+    word = WordFallback(enabled=not args.no_word, word_path=args.word_path,
+                        timeout=args.word_timeout, reg_fix=args.word_regfix)
     if args.word_path and not os.path.isfile(args.word_path):
         warn("--word-path 指定的文件不存在：%s（COM 调用仍使用系统注册的 Word）" % args.word_path)
 

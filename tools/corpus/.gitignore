@@ -1,0 +1,4 @@
+# Python 字节码与缓存目录不入库
+__pycache__/
+*.pyc
+*.pyo
