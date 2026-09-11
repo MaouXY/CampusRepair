@@ -127,7 +127,8 @@ app:
         rrf-k: ${APP_RAG_HYBRID_RRF_K:60}
         # 关键词召回条数
         keyword-top-k: ${APP_RAG_HYBRID_KEYWORD_TOP_K:10}
-        # 向量召回条数
+        # 向量召回条数。实测（零字面重叠评测集、Bocha 重排区分度较弱）：10 优于 20——
+        # 候选池变大反而稀释精度（HitRate 0.77 → 0.68），因此保持较小召回数。
         vector-top-k: ${APP_RAG_HYBRID_VECTOR_TOP_K:10}
         # 两路召回的融合权重
         keyword-weight: ${APP_RAG_HYBRID_KEYWORD_WEIGHT:1.0}
