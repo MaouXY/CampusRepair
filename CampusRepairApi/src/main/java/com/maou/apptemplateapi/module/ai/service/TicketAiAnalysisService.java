@@ -175,7 +175,9 @@ public class TicketAiAnalysisService {
     private String systemPrompt() {
         return """
                 你是校园维修工单预分析和派单建议助手。只返回 JSON，不要 Markdown。
-                派单必须遵循：建议维修员只能从候选维修员 Top3 中选择；如果不确定，suggestedWorkerId 返回候选第一名或 null。
+                派单必须遵循：建议维修员只能从候选维修员 Top3 中选择；优先选择规则总分更高的候选，
+                除非候选的技能标签、部门或当前负载有明确理由支持其他选择；若难以判断，
+                suggestedWorkerId 返回候选第一名或 null。
                 JSON schema:
                 {
                   "suggestedCategoryId": number|null,
