@@ -1,4 +1,4 @@
-import type { TicketAiAnalysis } from '@/types/ai'
+import type { DispatchSuggestion, TicketAiAnalysis } from '@/types/ai'
 
 import request from '@/utils/request'
 
@@ -13,5 +13,11 @@ export function analyzeTicketApi(ticketId: string) {
 export function getLatestTicketAnalysisApi(ticketId: string) {
   return request.get<never, TicketAiAnalysis>(
     `/admin/tickets/${ticketId}/ai/analysis/latest`,
+  )
+}
+
+export function getDispatchSuggestionApi(ticketId: string) {
+  return request.get<never, DispatchSuggestion>(
+    `/admin/tickets/${ticketId}/dispatch-suggestion`,
   )
 }

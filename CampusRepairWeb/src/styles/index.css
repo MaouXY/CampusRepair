@@ -636,6 +636,38 @@ select {
   margin-bottom: 22px;
 }
 
+.tag-gap {
+  margin: 2px 4px 2px 0;
+}
+
+.muted-text {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.dispatch-candidates {
+  display: grid;
+  gap: 12px;
+}
+
+.dispatch-candidates h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dispatch-candidates .section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dispatch-candidates .section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .inline-form {
   display: grid;
   gap: 20px;

@@ -40,6 +40,10 @@ export interface AdminWorker {
   realName: string
   phone: string | null
   enabled: number
+  departmentName: string
+  skillTags: string[]
+  dispatchEnabled: number
+  maxActiveOrders: number
   createdAt: string
   updatedAt: string
 }
@@ -50,6 +54,10 @@ export interface AdminWorkerRequest {
   realName: string
   phone?: string
   enabled: number
+  departmentName: string
+  skillTags: string[]
+  dispatchEnabled: number
+  maxActiveOrders: number
 }
 
 export interface Notice {

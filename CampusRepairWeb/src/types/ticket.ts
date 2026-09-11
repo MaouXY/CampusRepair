@@ -120,6 +120,10 @@ export interface WorkerOption {
   username: string
   realName: string
   phone: string | null
+  departmentName: string
+  skillTags: string[]
+  activeOrderCount: number
+  maxActiveOrders: number
 }
 
 export interface AdminTodoOverview {

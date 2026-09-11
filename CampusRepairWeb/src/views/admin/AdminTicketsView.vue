@@ -3,7 +3,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { analyzeTicketApi, getLatestTicketAnalysisApi } from '@/api/ai'
+import {
+  analyzeTicketApi,
+  getDispatchSuggestionApi,
+  getLatestTicketAnalysisApi,
+} from '@/api/ai'
 import { listCategoriesApi } from '@/api/base'
 import {
   assignTicketApi,
@@ -14,7 +18,7 @@ import {
   rejectTicketApi,
   urgeTicketApi,
 } from '@/api/ticket'
-import type { TicketAiAnalysis } from '@/types/ai'
+import type { DispatchSuggestion, TicketAiAnalysis } from '@/types/ai'
 import type { OptionItem } from '@/types/base'
 import type {
   AdminTodoOverview,
@@ -45,6 +49,8 @@ const submitting = ref(false)
 const analyzing = ref(false)
 const detail = ref<TicketDetail | null>(null)
 const analysis = ref<TicketAiAnalysis | null>(null)
+const dispatchSuggestion = ref<DispatchSuggestion | null>(null)
+const dispatchLoading = ref(false)
 const categories = ref<OptionItem[]>([])
 const workers = ref<WorkerOption[]>([])
 const todo = ref<AdminTodoOverview | null>(null)
@@ -60,6 +66,39 @@ const canUrge = computed(() =>
 const assignButtonText = computed(() =>
   detail.value?.status === 'RETURNED' ? '重新派单' : '审核通过并派单',
 )
+const dispatchCandidates = computed(() =>
+  dispatchSuggestion.value?.candidates?.length
+    ? dispatchSuggestion.value.candidates
+    : analysis.value?.dispatchCandidates || [],
+)
+const dispatchSourceLabel = computed(() => {
+  switch (dispatchSuggestion.value?.recommendationSource) {
+    case 'AI':
+      return 'AI 智能派单建议'
+    case 'AI_FALLBACK':
+      return 'AI 降级 · 规则兜底建议'
+    default:
+      return '规则评分建议'
+  }
+})
+const dispatchSourceTagType = computed(() => {
+  switch (dispatchSuggestion.value?.recommendationSource) {
+    case 'AI':
+      return 'success'
+    case 'AI_FALLBACK':
+      return 'warning'
+    default:
+      return 'info'
+  }
+})
+const dispatchAlertTitle = computed(() => {
+  const name = dispatchSuggestion.value?.recommendedWorkerName
+  if (!name) return '暂无可推荐维修员'
+  const confidence = dispatchSuggestion.value?.recommendedConfidence
+  return confidence == null
+    ? `推荐维修员：${name}`
+    : `推荐维修员：${name}（置信度 ${confidence}）`
+})
 
 const pageData = ref<PageResult<TicketSummary>>({
   items: [],
@@ -158,11 +197,42 @@ function applyAnalysisSuggestion(source: TicketAiAnalysis | null) {
   }
 }
 
+function workerSelectLabel(worker: WorkerOption) {
+  const skills = worker.skillTags?.length ? worker.skillTags.join('、') : '未配技能'
+  return `${worker.realName}（${worker.departmentName}，${worker.activeOrderCount}/${worker.maxActiveOrders}，${skills}）`
+}
+
+function candidateScoreText(value: number | null | undefined) {
+  return value == null ? '-' : Number(value).toFixed(2)
+}
+
+async function loadDispatchSuggestion(ticketId: string) {
+  dispatchLoading.value = true
+  try {
+    dispatchSuggestion.value = await getDispatchSuggestionApi(ticketId)
+  } catch {
+    dispatchSuggestion.value = null
+  } finally {
+    dispatchLoading.value = false
+  }
+}
+
+function applyRecommendedWorker(workerId: string | null) {
+  if (!workerId) return
+  if (!workers.value.some((worker) => worker.id === workerId)) {
+    ElMessage.warning('推荐维修员不在可派单列表中，请手动选择')
+    return
+  }
+  assignForm.workerId = workerId
+  ElMessage.success(`已填入推荐维修员：${dispatchSuggestion.value?.recommendedWorkerName || workerId}`)
+}
+
 async function openDetail(ticketId: string) {
   drawerVisible.value = true
   detailLoading.value = true
   try {
     analysis.value = null
+    dispatchSuggestion.value = null
     detail.value = await getAdminTicketApi(ticketId)
     assignForm.categoryId = detail.value.categoryId
     assignForm.priority = detail.value.priority
@@ -171,6 +241,7 @@ async function openDetail(ticketId: string) {
     assignForm.remark = ''
 
     if (canReviewOrReassign.value) {
+      await loadDispatchSuggestion(ticketId)
       try {
         analysis.value = await getLatestTicketAnalysisApi(ticketId)
         applyAnalysisSuggestion(analysis.value)
@@ -189,6 +260,7 @@ async function handleAnalyze() {
   try {
     analysis.value = await analyzeTicketApi(detail.value.id)
     applyAnalysisSuggestion(analysis.value)
+    await loadDispatchSuggestion(detail.value.id)
     ElMessage.success('AI 预分析完成')
   } finally {
     analyzing.value = false
@@ -388,6 +460,57 @@ async function handleUrge() {
             <el-descriptions-item label="风险等级">{{ formatRiskLevel(analysis.riskLevel) }}</el-descriptions-item>
             <el-descriptions-item label="置信度">{{ analysis.confidence }}</el-descriptions-item>
           </el-descriptions>
+          <section v-if="canReviewOrReassign" class="dispatch-candidates detail-block">
+            <div class="section-header">
+              <h3>智能派单建议</h3>
+              <div class="section-actions">
+                <el-tag :type="dispatchSourceTagType" size="small">{{ dispatchSourceLabel }}</el-tag>
+                <el-button size="small" :loading="dispatchLoading" @click="loadDispatchSuggestion(detail.id)">
+                  刷新建议
+                </el-button>
+              </div>
+            </div>
+            <el-alert
+              v-if="dispatchSuggestion?.recommendedReason"
+              :title="dispatchAlertTitle"
+              :description="dispatchSuggestion.recommendedReason"
+              type="success"
+              :closable="false"
+              show-icon
+            />
+            <el-table v-if="dispatchCandidates.length > 0" :data="dispatchCandidates" size="small" border>
+              <el-table-column label="推荐" width="72">
+                <template #default="{ row }">
+                  <el-tag v-if="row.aiRecommended" type="success" size="small">推荐</el-tag>
+                  <span v-else class="muted-text">候选</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="workerName" label="维修员" width="96" />
+              <el-table-column prop="departmentName" label="部门" width="110" />
+              <el-table-column label="技能" min-width="150">
+                <template #default="{ row }">
+                  <el-tag v-for="tag in row.skillTags" :key="tag" class="tag-gap" size="small">{{ tag }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="负载" width="78">
+                <template #default="{ row }">{{ row.activeOrderCount }}/{{ row.maxActiveOrders }}</template>
+              </el-table-column>
+              <el-table-column label="总分" width="78">
+                <template #default="{ row }">{{ candidateScoreText(row.totalScore) }}</template>
+              </el-table-column>
+              <el-table-column label="规则原因" min-width="220">
+                <template #default="{ row }">{{ row.ruleReason }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="80" fixed="right">
+                <template #default="{ row }">
+                  <el-button size="small" type="primary" link @click="applyRecommendedWorker(row.workerId)">
+                    填入
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <p v-else class="muted-text">暂无参与智能派单的候选维修员，请先在基础数据中维护维修员画像与技能标签。</p>
+          </section>
           <el-form-item label="确认分类" required>
             <el-select v-model="assignForm.categoryId" filterable>
               <el-option
@@ -409,7 +532,7 @@ async function handleUrge() {
               <el-option
                 v-for="worker in workers"
                 :key="worker.id"
-                :label="`${worker.realName}（${worker.username}）`"
+                :label="workerSelectLabel(worker)"
                 :value="worker.id"
               />
             </el-select>

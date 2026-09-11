@@ -69,6 +69,10 @@ const workerForm = reactive<AdminWorkerRequest>({
   realName: '',
   phone: '',
   enabled: 1,
+  departmentName: '综合维修组',
+  skillTags: [],
+  dispatchEnabled: 1,
+  maxActiveOrders: 5,
 })
 const noticeForm = reactive<NoticeRequest>({
   title: '',
@@ -79,6 +83,8 @@ const noticeForm = reactive<NoticeRequest>({
 })
 
 const drawerTitle = computed(() => `${editingId.value ? '编辑' : '新增'}${tabLabel(activeTab.value)}`)
+const departmentOptions = ['水电组', '网络组', '空调照明组', '综合维修组']
+const skillOptions = ['水电', '网络', '门窗', '空调', '照明', '公共设施']
 
 const currentRows = computed(() => {
   if (activeTab.value === 'categories') return categories.value
@@ -98,6 +104,7 @@ const rules = computed<FormRules>(() => {
     return {
       username: [{ required: true, message: '请输入账号', trigger: 'blur' }],
       realName: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+      departmentName: [{ required: true, message: '请选择所属部门', trigger: 'change' }],
     }
   }
   return {
@@ -166,7 +173,17 @@ async function loadCurrent() {
 function resetForms() {
   Object.assign(categoryForm, { name: '', sortOrder: 10, enabled: 1 })
   Object.assign(locationForm, { parentId: null, name: '', sortOrder: 10, enabled: 1 })
-  Object.assign(workerForm, { username: '', password: '', realName: '', phone: '', enabled: 1 })
+  Object.assign(workerForm, {
+    username: '',
+    password: '',
+    realName: '',
+    phone: '',
+    enabled: 1,
+    departmentName: '综合维修组',
+    skillTags: [],
+    dispatchEnabled: 1,
+    maxActiveOrders: 5,
+  })
   Object.assign(noticeForm, { title: '', content: '', targetRole: 'ALL', published: 1, sortOrder: 10 })
 }
 
@@ -202,6 +219,10 @@ function openEdit(row: AdminCategory | AdminLocation | AdminWorker | Notice) {
       realName: item.realName,
       phone: item.phone || '',
       enabled: item.enabled,
+      departmentName: item.departmentName || '综合维修组',
+      skillTags: item.skillTags || [],
+      dispatchEnabled: item.dispatchEnabled ?? 1,
+      maxActiveOrders: item.maxActiveOrders ?? 5,
     })
   } else {
     const item = row as Notice
@@ -308,6 +329,23 @@ loadCurrent()
         <template v-else-if="activeTab === 'workers'">
           <el-table-column prop="username" label="账号" min-width="160" />
           <el-table-column prop="realName" label="姓名" min-width="140" />
+          <el-table-column prop="departmentName" label="部门" min-width="130" />
+          <el-table-column label="技能" min-width="180">
+            <template #default="{ row }">
+              <el-tag v-for="tag in row.skillTags" :key="tag" class="tag-gap" size="small">{{ tag }}</el-tag>
+              <span v-if="!row.skillTags?.length" class="muted-text">未配置</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="派单" width="110">
+            <template #default="{ row }">
+              <el-tag :type="row.dispatchEnabled === 1 ? 'success' : 'info'">
+                {{ row.dispatchEnabled === 1 ? '参与' : '停用' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="负载上限" width="100">
+            <template #default="{ row }">{{ row.maxActiveOrders }}</template>
+          </el-table-column>
           <el-table-column prop="phone" label="电话" min-width="160" />
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
@@ -408,6 +446,22 @@ loadCurrent()
           </el-form-item>
           <el-form-item label="电话">
             <el-input v-model="workerForm.phone" maxlength="32" />
+          </el-form-item>
+          <el-form-item label="所属部门" prop="departmentName">
+            <el-select v-model="workerForm.departmentName">
+              <el-option v-for="item in departmentOptions" :key="item" :label="item" :value="item" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="技能标签">
+            <el-select v-model="workerForm.skillTags" multiple collapse-tags collapse-tags-tooltip>
+              <el-option v-for="item in skillOptions" :key="item" :label="item" :value="item" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参与智能派单">
+            <el-switch v-model="workerForm.dispatchEnabled" :active-value="1" :inactive-value="0" />
+          </el-form-item>
+          <el-form-item label="负载上限">
+            <el-input-number v-model="workerForm.maxActiveOrders" :min="1" :max="20" />
           </el-form-item>
           <el-form-item label="状态">
             <el-switch v-model="workerForm.enabled" :active-value="1" :inactive-value="0" />
