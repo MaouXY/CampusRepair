@@ -92,3 +92,40 @@ export interface AiTokenUsage {
   currentLevel: string
   message: string
 }
+
+export interface KnowledgeDraft {
+  id: string
+  sourceTicketId: string | null
+  title: string
+  content: string
+  categoryId: string | null
+  status: 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | string
+  createdByAi: boolean
+  generateSource: string
+  reviewRemark: string | null
+  reviewedBy: string | null
+  reviewedAt: string | null
+  knowledgeDocumentId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type KnowledgeDraftPage = PageResult<KnowledgeDraft>
+
+export interface RagVectorStatus {
+  embeddingProvider: string
+  embeddingModel: string
+  dimension: number
+  milvusEnabled: boolean
+  collectionName: string
+  documentCount: number
+  chunkCount: number
+  syncedChunkCount: number
+  pendingChunkCount: number
+  failedChunkCount: number
+  hybridEnabled: boolean
+  rrfK: number
+  rerankEnabled: boolean
+  rerankModel: string
+  message: string
+}

@@ -5,32 +5,40 @@ import type {
   AiTokenUsage,
   KnowledgeDocument,
   KnowledgeDocumentRequest,
+  KnowledgeDraft,
   RagEvalDataset,
   RagEvalRun,
   RagEvalRunDetail,
+  RagVectorStatus,
 } from '@/types/rag'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { listCategoriesApi } from '@/api/base'
 import {
+  approveKnowledgeDraftApi,
   createKnowledgeDocumentApi,
   deleteKnowledgeDocumentApi,
+  generateKnowledgeDraftApi,
   getAiTokenUsageApi,
   getRagEvalRunApi,
+  getRagVectorStatusApi,
   importRagEvalCasesApi,
   listKnowledgeDocumentsApi,
+  listKnowledgeDraftsApi,
   listRagEvalDatasetsApi,
   listRagEvalRunsApi,
   rebuildKnowledgeDocumentApi,
+  rejectKnowledgeDraftApi,
   runRagEvalApi,
   updateKnowledgeDocumentApi,
 } from '@/api/rag'
+import { formatDateTime } from '@/utils/ticketDisplay'
 
 const loading = ref(false)
 const drawerVisible = ref(false)
 const submitting = ref(false)
-const editingId = ref<number | null>(null)
+const editingId = ref<string | null>(null)
 const formRef = ref<FormInstance>()
 const categories = ref<OptionItem[]>([])
 const documents = ref<KnowledgeDocument[]>([])
@@ -42,6 +50,27 @@ const evalDetail = ref<RagEvalRunDetail | null>(null)
 const evalRunning = ref(false)
 const importVisible = ref(false)
 const importSubmitting = ref(false)
+
+const vectorStatus = ref<RagVectorStatus | null>(null)
+const vectorLoading = ref(false)
+const drafts = ref<KnowledgeDraft[]>([])
+const draftsLoading = ref(false)
+const draftStatus = ref('')
+const generateTicketId = ref('')
+const generating = ref(false)
+const draftQuery = reactive({
+  page: 1,
+  size: 10,
+  total: 0,
+})
+
+const draftStatusOptions = [
+  { label: '全部状态', value: '' },
+  { label: '待审核', value: 'PENDING_REVIEW' },
+  { label: '已通过', value: 'APPROVED' },
+  { label: '已驳回', value: 'REJECTED' },
+]
+
 const importForm = reactive({
   datasetName: 'imported-eval',
   source: 'open-dataset-sample',
@@ -89,8 +118,158 @@ const rules: FormRules = {
 
 onMounted(async () => {
   categories.value = await listCategoriesApi()
-  await Promise.all([loadDocuments(), loadTokenUsage(), loadEvalPanel()])
+  await Promise.all([
+    loadDocuments(),
+    loadTokenUsage(),
+    loadEvalPanel(),
+    loadVectorStatus(),
+    loadDrafts(),
+  ])
 })
+
+async function loadVectorStatus() {
+  vectorLoading.value = true
+  try {
+    vectorStatus.value = await getRagVectorStatusApi()
+  } catch {
+    vectorStatus.value = null
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+async function loadDrafts() {
+  draftsLoading.value = true
+  try {
+    const result = await listKnowledgeDraftsApi({
+      page: draftQuery.page,
+      size: draftQuery.size,
+      status: draftStatus.value || undefined,
+    })
+    drafts.value = result.items || []
+    draftQuery.total = result.total || 0
+  } catch {
+    drafts.value = []
+    draftQuery.total = 0
+  } finally {
+    draftsLoading.value = false
+  }
+}
+
+function handleDraftFilter() {
+  draftQuery.page = 1
+  return loadDrafts()
+}
+
+async function handleGenerateDraft() {
+  const ticketId = generateTicketId.value.trim()
+  if (!ticketId) {
+    ElMessage.warning('请输入来源工单 ID')
+    return
+  }
+  generating.value = true
+  try {
+    const draft = await generateKnowledgeDraftApi(ticketId)
+    ElMessage.success(`已生成知识草稿：${draft.title}`)
+    generateTicketId.value = ''
+    draftQuery.page = 1
+    await loadDrafts()
+  } catch {
+    // 失败提示由请求拦截器统一处理
+  } finally {
+    generating.value = false
+  }
+}
+
+function draftSourceLabel(source: string) {
+  switch (source) {
+    case 'AI':
+      return 'AI 生成'
+    case 'AI_DEGRADED':
+      return 'AI 降级'
+    case 'RULE':
+      return '规则兜底'
+    default:
+      return source || '-'
+  }
+}
+
+function draftSourceTagType(source: string) {
+  switch (source) {
+    case 'AI':
+      return 'success'
+    case 'AI_DEGRADED':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+function draftStatusLabel(status: string) {
+  switch (status) {
+    case 'PENDING_REVIEW':
+      return '待审核'
+    case 'APPROVED':
+      return '已通过'
+    case 'REJECTED':
+      return '已驳回'
+    default:
+      return status || '-'
+  }
+}
+
+function draftStatusTagType(status: string) {
+  switch (status) {
+    case 'PENDING_REVIEW':
+      return 'warning'
+    case 'APPROVED':
+      return 'success'
+    case 'REJECTED':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+async function handleApproveDraft(row: KnowledgeDraft) {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `确认通过知识草稿“${row.title}”并入库？备注可留空。`,
+      '知识草稿审核',
+      {
+        confirmButtonText: '确认通过',
+        cancelButtonText: '取消',
+        inputPlaceholder: '审核备注（可留空）',
+        inputValue: '',
+      },
+    )
+    await approveKnowledgeDraftApi(row.id, value || '')
+    ElMessage.success('已通过并入库')
+    await loadDrafts()
+  } catch {
+    // 用户取消或请求失败
+  }
+}
+
+async function handleRejectDraft(row: KnowledgeDraft) {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `确认驳回知识草稿“${row.title}”？备注可留空。`,
+      '知识草稿审核',
+      {
+        confirmButtonText: '确认驳回',
+        cancelButtonText: '取消',
+        inputPlaceholder: '驳回原因（可留空）',
+        inputValue: '',
+      },
+    )
+    await rejectKnowledgeDraftApi(row.id, value || '')
+    ElMessage.success('已驳回该草稿')
+    await loadDrafts()
+  } catch {
+    // 用户取消或请求失败
+  }
+}
 
 async function loadTokenUsage() {
   try {
@@ -337,6 +516,152 @@ async function handleRebuild(row: KnowledgeDocument) {
         </div>
       </el-form>
     </el-drawer>
+
+    <div class="section-heading">
+      <div>
+        <p class="panel__eyebrow">RAG 检索链路</p>
+        <h2>向量检索状态</h2>
+      </div>
+      <el-button :loading="vectorLoading" @click="loadVectorStatus">刷新状态</el-button>
+    </div>
+
+    <div class="dispatch-candidates detail-block" v-loading="vectorLoading">
+      <el-descriptions v-if="vectorStatus" border :column="4">
+        <el-descriptions-item label="Embedding 提供方">
+          {{ vectorStatus.embeddingProvider || '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="Embedding 模型">
+          {{ vectorStatus.embeddingModel || '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="向量维度">{{ vectorStatus.dimension }}</el-descriptions-item>
+        <el-descriptions-item label="Milvus 向量库">
+          <el-tag :type="vectorStatus.milvusEnabled ? 'success' : 'info'" size="small">
+            {{ vectorStatus.milvusEnabled ? '开启' : '关闭' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="集合名称">
+          {{ vectorStatus.collectionName || '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="知识文档数">{{ vectorStatus.documentCount }}</el-descriptions-item>
+        <el-descriptions-item label="知识片段数">{{ vectorStatus.chunkCount }}</el-descriptions-item>
+        <el-descriptions-item label="已同步片段">{{ vectorStatus.syncedChunkCount }}</el-descriptions-item>
+        <el-descriptions-item label="待同步片段">{{ vectorStatus.pendingChunkCount }}</el-descriptions-item>
+        <el-descriptions-item label="同步失败片段">{{ vectorStatus.failedChunkCount }}</el-descriptions-item>
+        <el-descriptions-item label="混合检索">
+          <el-tag :type="vectorStatus.hybridEnabled ? 'success' : 'info'" size="small">
+            {{ vectorStatus.hybridEnabled ? '开启' : '关闭' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="RRF K 值">{{ vectorStatus.rrfK }}</el-descriptions-item>
+        <el-descriptions-item label="重排">
+          <el-tag :type="vectorStatus.rerankEnabled ? 'success' : 'info'" size="small">
+            {{ vectorStatus.rerankEnabled ? '开启' : '关闭' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="重排模型">{{ vectorStatus.rerankModel || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <el-alert
+        v-if="vectorStatus"
+        :type="vectorStatus.failedChunkCount > 0 ? 'warning' : 'info'"
+        :closable="false"
+        :title="vectorStatus.message"
+        show-icon
+      />
+      <el-alert
+        v-else-if="!vectorLoading"
+        type="info"
+        :closable="false"
+        title="暂未获取到向量检索状态"
+        show-icon
+      />
+    </div>
+
+    <div class="section-heading">
+      <div>
+        <p class="panel__eyebrow">知识沉淀</p>
+        <h2>知识草稿审核</h2>
+      </div>
+      <div class="section-actions">
+        <el-input
+          v-model="generateTicketId"
+          placeholder="来源工单 ID"
+          style="width: 180px"
+          clearable
+        />
+        <el-button type="primary" :loading="generating" @click="handleGenerateDraft">
+          从工单生成草稿
+        </el-button>
+      </div>
+    </div>
+
+    <div class="dispatch-candidates detail-block">
+      <div class="section-actions">
+        <el-select v-model="draftStatus" style="width: 160px" @change="handleDraftFilter">
+          <el-option
+            v-for="option in draftStatusOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-button :loading="draftsLoading" @click="loadDrafts">刷新草稿</el-button>
+        <span class="muted-text">共 {{ draftQuery.total }} 条草稿</span>
+      </div>
+
+      <el-table
+        :data="drafts"
+        v-loading="draftsLoading"
+        size="small"
+        border
+        empty-text="暂无知识草稿"
+      >
+        <el-table-column prop="title" label="标题" min-width="220" />
+        <el-table-column label="来源工单" width="120">
+          <template #default="{ row }">
+            <span v-if="row.sourceTicketId">#{{ row.sourceTicketId }}</span>
+            <span v-else class="muted-text">手动生成</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="生成方式" width="120">
+          <template #default="{ row }">
+            <el-tag :type="draftSourceTagType(row.generateSource)" size="small">
+              {{ draftSourceLabel(row.generateSource) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="draftStatusTagType(row.status)" size="small">
+              {{ draftStatusLabel(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="createdAt" label="创建时间" min-width="160">
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="180" fixed="right">
+          <template #default="{ row }">
+            <template v-if="row.status === 'PENDING_REVIEW'">
+              <el-button link type="primary" @click="handleApproveDraft(row)">通过</el-button>
+              <el-button link type="danger" @click="handleRejectDraft(row)">驳回</el-button>
+            </template>
+            <span v-else-if="row.status === 'APPROVED'" class="muted-text">
+              已入库<template v-if="row.knowledgeDocumentId"> #{{ row.knowledgeDocumentId }}</template>
+            </span>
+            <span v-else class="muted-text">{{ row.reviewRemark || '已驳回' }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-pagination
+        class="table-pagination"
+        layout="prev, pager, next, total"
+        v-model:current-page="draftQuery.page"
+        :page-size="draftQuery.size"
+        :total="draftQuery.total"
+        @current-change="loadDrafts"
+      />
+    </div>
 
     <div class="section-heading">
       <div>

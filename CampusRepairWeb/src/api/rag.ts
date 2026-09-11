@@ -3,9 +3,12 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentPage,
   KnowledgeDocumentRequest,
+  KnowledgeDraft,
+  KnowledgeDraftPage,
   RagEvalDataset,
   RagEvalRunDetail,
   RagEvalRunPage,
+  RagVectorStatus,
 } from '@/types/rag'
 
 import request from '@/utils/request'
@@ -71,4 +74,36 @@ export function importRagEvalCasesApi(payload: {
 
 export function getAiTokenUsageApi() {
   return request.get<never, AiTokenUsage>('/admin/ai/token-usage')
+}
+
+export function listKnowledgeDraftsApi(params: {
+  page: number
+  size: number
+  status?: string
+}) {
+  return request.get<never, KnowledgeDraftPage>('/admin/rag/drafts', { params })
+}
+
+export function generateKnowledgeDraftApi(ticketId: string) {
+  return request.post<never, KnowledgeDraft>('/admin/rag/drafts/generate', null, {
+    params: { ticketId },
+  })
+}
+
+export function approveKnowledgeDraftApi(draftId: string, remark: string) {
+  return request.post<never, KnowledgeDraft>(
+    `/admin/rag/drafts/${draftId}/approve`,
+    { remark },
+  )
+}
+
+export function rejectKnowledgeDraftApi(draftId: string, remark: string) {
+  return request.post<never, KnowledgeDraft>(
+    `/admin/rag/drafts/${draftId}/reject`,
+    { remark },
+  )
+}
+
+export function getRagVectorStatusApi() {
+  return request.get<never, RagVectorStatus>('/admin/rag/vector-status')
 }
