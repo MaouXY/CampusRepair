@@ -75,11 +75,21 @@ public class RagRerankService {
         }
     }
 
-    private Map<String, Double> parseScores(String response, List<RagChunkResponse> candidates) {
+    /**
+     * 解析重排响应。
+     *
+     * <p>不同厂商的响应结构不同：Bocha 返回 {@code {"code":200,"data":{"results":[{"index":0,"relevance_score":0.16}]}}}，
+     * 也有厂商直接在顶层给 {@code results}，两种都要兼容——否则解析不到分数会被误判为失败而静默跳过重排。
+     */
+    Map<String, Double> parseScores(String response, List<RagChunkResponse> candidates) {
         try {
             JsonNode root = objectMapper.readTree(response);
             JsonNode results = root.path("results");
             if (!results.isArray()) {
+                results = root.path("data").path("results");
+            }
+            if (!results.isArray()) {
+                log.warn("rag rerank response has no results array, scenario=rag-rerank-parse, response={}", response);
                 return Map.of();
             }
             Map<String, Double> scores = new LinkedHashMap<>();

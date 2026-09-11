@@ -85,7 +85,7 @@ app:
       rerank:
         enabled: ${APP_AGENT_RERANK_ENABLED:true}
         base-url: ${APP_AGENT_RERANK_BASE_URL:https://api.bocha.cn/v1/rerank}
-        api-key: ${APP_AGENT_RERANK_API_KEY:}
+        api-key: ${APP_AGENT_RERANK_API_KEY:sk-7c2455144b084f81890d51c6620f7969}
         timeout-seconds: ${APP_AGENT_RERANK_TIMEOUT_SECONDS:20}
         model: ${APP_AGENT_RERANK_MODEL:gte-rerank}
         top-n: ${APP_AGENT_RERANK_TOP_N:6}
