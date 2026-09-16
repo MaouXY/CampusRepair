@@ -70,13 +70,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\milvus-import.ps1 `
 
 跨电脑必查：目标机 Milvus **版本 ≥ 源端**、`19530` 可达（REST v2 就在这个端口）、embedding 模型与**维度必须一致**（本项目 `doubao-embedding-text-240715` / **2560 维**），否则搬过去检索结果无意义。
 
-### 2.2 为什么不能用 Attu 直接导入这个 JSON
+### 2.2 也可以用 Attu 导入（需要先转成 JSON 数组格式）
 
-**Attu 没有"上传本地文件导入数据"的功能**，它能做的只有：浏览集合/实体、执行查询、手动逐条 Insert、建集合与索引、查看索引与加载状态。所以：
+**更正**：Attu v2.4+ 的集合页确实有「**导入数据**」入口（Collection → 导入数据 → 选择 CSV 或 JSON 文件），
+可以直接把数据灌进指定集合。但它对文件有明确要求：
 
-- ❌ 把 `milvus-*.jsonl` 拖进 Attu → 不存在这个入口；
-- ⚠️ Attu 若暴露 **Bulk Insert / Import（批量导入）**，那条路要求文件先放进 **Milvus 能访问的对象存储**（本机是 MinIO 的 `a-bucket`），并符合 Milvus 导入格式规范，链路比直接跑脚本长得多；
-- ✅ 正确姿势还是**用脚本导入**（方式 A）；Attu 留给"导入完去肉眼看数据对不对"最合适 —— 连 `127.0.0.1:19530`、认证方式选「无」，就能看到集合实体数与向量字段。
+| Attu 的要求 | 我们的导出文件情况 | 处理 |
+| --- | --- | --- |
+| 必须是 **CSV 或 JSON** | 导出的是 **NDJSON**（每行一个对象） | 需转格式 ↓ |
+| JSON 必须是**数组** `[{...},{...}]` | 我们的首行还是 `__schema` 元信息 | 需去掉首行并包成数组 ↓ |
+| 列名必须与 Schema 字段名一致 | `id / text / metadata / vector` ✓ | 无需处理 |
+| 单文件 < 150MB、行数 < 100000 | 4.39MB / 191 行 ✓ | 无需处理 |
+| **只新增记录，不能更新已有记录** | — | 导入前确认集合为空或换名 |
+
+转换与使用：
+
+```powershell
+# 生成 Attu 可直接导入的 JSON 数组文件（默认输出到导出文件同目录，文件名前缀 attu-）
+pwsh tools/milvus-jsonl-to-attu.ps1 -Verify
+# 产出：backup\attu-milvus-campus_repair_knowledge.json（191 条、4.39MB、UTF-8 无 BOM）
+```
+
+然后在 Attu 里：选集合 `campus_repair_knowledge` → **导入数据** → 分区默认 `defaultPartition` →
+「选择CSV或者JSON文件」选上面那个 `attu-*.json` → 下一步。导入完在「数据」标签页翻一下，
+或在「Schema / 数据段」里看行数是否 191。
+
+两种方式的取舍：
+
+- **Attu 导入**：图形界面、不用命令行，适合临时补数据；但它是**只增不改**，表里已有数据时会变成重复记录；大批量时浏览器端解析 JSON 可能较慢。
+- **脚本导入**（2.1）：可自动化、可跨机、会自动建集合并做 `count(*)` 校验；**推荐用于正式迁移**。
 
 ## 3. 方式 B：MySQL 知识表 + 目标端重建（推荐用于本项目）
 
