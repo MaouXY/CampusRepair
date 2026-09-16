@@ -56,6 +56,18 @@ python tools/milvus_migrate.py import --source milvus.jsonl --dry-run   # 只检
 
 实测（本机同一实例搬成副本集合）：导出 191 条 → 目标自动建集合（含 AUTOINDEX/COSINE 索引）+ 分批插入 → `count(*)=191` 校验一致 → 副本已删除。
 
+**目标机器只有老版 Windows PowerShell（5.1）也能跑**（已实测：5.1 与 7 都通过）：
+
+```powershell
+# 只要把这一个脚本 + 导出文件拷过去即可（不必克隆整个仓库）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\milvus-import.ps1 `
+  -Source milvus-campus_repair_knowledge.jsonl `
+  -Collection campus_repair_knowledge -CreateCollection
+```
+> 注意：脚本内是中文注释与提示，**必须带 UTF-8 BOM** 保存，否则 PowerShell 5.1 会按 ANSI 解码、把引号吃掉报 "The string is missing the terminator"。
+> `tools/` 下的脚本都已加 BOM（git 里存的是带 BOM 的 UTF-8），用记事本另存时请选"UTF-8"而不是"ANSI"。
+
+
 跨电脑必查：目标机 Milvus **版本 ≥ 源端**、`19530` 可达（REST v2 就在这个端口）、embedding 模型与**维度必须一致**（本项目 `doubao-embedding-text-240715` / **2560 维**），否则搬过去检索结果无意义。
 
 ### 2.2 为什么不能用 Attu 直接导入这个 JSON

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   把 milvus-export.ps1 导出的 JSONL 导入到另一个 Milvus 实例（可自动按原集合结构建集合、建索引、加载）。
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   用 Milvus REST v2 接口把一个集合（含向量）导出为 JSONL，不需要安装 pymilvus 等任何依赖。
 
