@@ -68,7 +68,13 @@ UPDATE rag_knowledge_draft SET created_at = created_at + INTERVAL $delta DAY,
 UPDATE repair_notice SET
   created_at = created_at + INTERVAL $delta DAY,
   updated_at = updated_at + INTERVAL $delta DAY,
-  effective_at = IF(effective_at IS NULL, NULL, effective_at + INTERVAL $delta DAY),
+  -- 生效时间平移后可能落到未来（当时是按"当天 23 点"造的），会被判为"未生效"而不下发，
+  -- 这里统一拉回到 1 小时前，保证公告处于"有效中"状态；过期时间保持平移结果。
+  effective_at = CASE
+      WHEN effective_at IS NULL THEN NULL
+      WHEN effective_at + INTERVAL $delta DAY > NOW() THEN DATE_SUB(NOW(), INTERVAL 1 HOUR)
+      ELSE effective_at + INTERVAL $delta DAY
+  END,
   expire_at = IF(expire_at IS NULL, NULL, expire_at + INTERVAL $delta DAY);
 
 SELECT COUNT(*) AS 工单总数,
