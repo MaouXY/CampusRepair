@@ -40,6 +40,32 @@ pwsh tools/milvus-import.ps1 -DryRun
 
 **注意**：跨实例迁移建议 `-Collection` 换个名字或用不同实例，避免目标端已有同名集合导致数据重复（Milvus 不会去重，`id` 相同也只是两条）。
 
+### 2.1 跨电脑迁移（目标机没有 PowerShell 也能做）
+
+仓库里同时提供了**零依赖 Python 版** `tools/milvus_migrate.py`（只用标准库，有 Python 3.8+ 即可）：
+
+```bash
+# 源机器（本机）
+python tools/milvus_migrate.py export --collection campus_repair_knowledge --output milvus.jsonl
+
+# 把 milvus.jsonl（约 4.4MB）拷到另一台电脑，然后在那边执行
+python tools/milvus_migrate.py import --source milvus.jsonl \
+    --milvus http://127.0.0.1:19530 --collection campus_repair_knowledge --create
+python tools/milvus_migrate.py import --source milvus.jsonl --dry-run   # 只检查
+```
+
+实测（本机同一实例搬成副本集合）：导出 191 条 → 目标自动建集合（含 AUTOINDEX/COSINE 索引）+ 分批插入 → `count(*)=191` 校验一致 → 副本已删除。
+
+跨电脑必查：目标机 Milvus **版本 ≥ 源端**、`19530` 可达（REST v2 就在这个端口）、embedding 模型与**维度必须一致**（本项目 `doubao-embedding-text-240715` / **2560 维**），否则搬过去检索结果无意义。
+
+### 2.2 为什么不能用 Attu 直接导入这个 JSON
+
+**Attu 没有"上传本地文件导入数据"的功能**，它能做的只有：浏览集合/实体、执行查询、手动逐条 Insert、建集合与索引、查看索引与加载状态。所以：
+
+- ❌ 把 `milvus-*.jsonl` 拖进 Attu → 不存在这个入口；
+- ⚠️ Attu 若暴露 **Bulk Insert / Import（批量导入）**，那条路要求文件先放进 **Milvus 能访问的对象存储**（本机是 MinIO 的 `a-bucket`），并符合 Milvus 导入格式规范，链路比直接跑脚本长得多；
+- ✅ 正确姿势还是**用脚本导入**（方式 A）；Attu 留给"导入完去肉眼看数据对不对"最合适 —— 连 `127.0.0.1:19530`、认证方式选「无」，就能看到集合实体数与向量字段。
+
 ## 3. 方式 B：MySQL 知识表 + 目标端重建（推荐用于本项目）
 
 向量是**由切片文本算出来的派生数据**，所以只要源数据在，目标端重建即可：
