@@ -1,0 +1,54 @@
+# milvus-backup 配置（configVersion v2）
+# 用法见 doc/15_知识库迁移与Milvus导出导入.md
+#
+# 本机（源实例）实测参数：
+#   Milvus 容器 milvus-standalone：gRPC 19530，REST 也在 19530（9091 只有 /healthz）
+#   MinIO 容器 milvus-minio：API 9000，控制台 9001，桶 a-bucket，根路径 files，账号 minioadmin/minioadmin
+#   Milvus 与 MinIO 在同一个 Docker 网络：milvus
+#
+# 【跑在 milvus 网络里的容器】用容器名：
+#   milvus.address: milvus-standalone / milvus.storage.address: milvus-minio
+# 【跑在宿主机/其它网络】用 host.docker.internal（下面默认值就是这种，兼容性更好）
+
+configVersion: v2
+
+log:
+  level: info
+  console: true
+  file:
+    rootPath: "logs/backup.log"
+
+# ===== ① Milvus 自身：备份时填【源实例】，恢复时填【目标实例】 =====
+milvus:
+  address: host.docker.internal
+  port: 19530
+  # 若目标实例的 REST 端口与 gRPC 不同（如 REST 在 9091），在这里显式指定 REST 地址
+  # restfulAddress: host.docker.internal:9091
+  storage:
+    # 必须与 Milvus 实际使用的对象存储完全一致，否则读不到 segment/binlog
+    provider: minio
+    address: host.docker.internal
+    port: 9000
+    useSSL: false
+    bucketName: a-bucket
+    rootPath: files
+    auth:
+      type: static
+      accessKeyID: minioadmin
+      secretAccessKey: minioadmin
+
+# ===== ② 备份文件写到哪里（可与 ① 不同 → 即"跨存储"能力）=====
+# 目标实例与源实例存储不同时，把 ① 指向目标 Milvus 及其存储，把这里指向备份文件所在存储。
+backup:
+  storage:
+    provider: minio
+    address: host.docker.internal
+    port: 9000
+    useSSL: false
+    # 该桶需要先在 MinIO 控制台（http://127.0.0.1:9001，minioadmin/minioadmin）里创建
+    bucketName: milvus-backup
+    rootPath: backup
+    auth:
+      type: static
+      accessKeyID: minioadmin
+      secretAccessKey: minioadmin

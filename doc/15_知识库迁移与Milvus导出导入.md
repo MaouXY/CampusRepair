@@ -57,14 +57,99 @@ mysqldump --host=127.0.0.1 --user=root --password=1829002 --default-character-se
 优点：不依赖 Milvus 版本与存储、无需搬向量文件；缺点：会重新调用 embedding（191 条成本极低）。
 `vector-status` 接口可确认「已同步/待同步/失败」数量。
 
-## 4. 方式 C：官方 milvus-backup（整实例备份恢复）
+## 4. 方式 C：官方 milvus-backup（完整步骤）
 
-```bash
-# 备份端 backup.yaml 需同时配置 Milvus 连接与备份存储（S3/MinIO）
-milvus-backup create -n campus_repair_backup --colls campus_repair_knowledge
-milvus-backup restore -n campus_repair_backup --colls campus_repair_knowledge   # 在目标实例执行
+### 4.1 版本规则（官方 README 原文要点）
+
+- **最新版 milvus-backup 支持从 Milvus 2.2+ 备份、恢复到 Milvus 2.4+**
+- **备份只能恢复到「同版本或更新版本」**的 Milvus（例如从 2.5 备份的不能恢复到 2.4）
+- 本机是 Milvus **2.4.9** → 直接用最新版 **v0.6.0**（不需要找老版本 v0.4.x）
+
+### 4.2 Windows 上怎么跑
+
+官方只发布 **Linux / macOS** 二进制（没有 Windows exe），三种办法：
+
+```powershell
+# ① 推荐：用 Docker 镜像跑（本机已有 Docker）
+docker run --rm --network milvus `
+  -v F:\javaWeb\毕设接单\CampusRepair\tools\milvus-backup.yaml:/app/configs/backup.yaml `
+  zilliz/milvus-backup:latest list
+
+# ② WSL2 里用 Linux 二进制
+#   下载 milvus-backup_0.6.0_Linux_x86_64.tar.gz 解压后执行
+
+# ③ 若不确定镜像里的配置路径，先进去看一眼
+docker run --rm --entrypoint sh zilliz/milvus-backup:latest -c 'ls /app/configs; /milvus-backup --help'
 ```
-前提：**目标端能访问同一份备份存储**。本机 Milvus 是 Docker 版，MinIO 也是容器内的，跨机器使用时通常要先把 MinIO 的 bucket 目录拷过去。
+
+### 4.3 配置（`tools/milvus-backup.yaml` 已按本机实测参数写好）
+
+关键点：**`milvus.storage` 必须与 Milvus 实际使用的对象存储一致**，否则读不到 segment/binlog：
+
+| 项 | 本机实测值 |
+| --- | --- |
+| Milvus gRPC | `19530`（REST 也在 19530） |
+| MinIO API / 控制台 | `9000` / `9001`（控制台 http://127.0.0.1:9001，minioadmin/minioadmin） |
+| bucket / rootPath | `a-bucket` / `files` |
+| 账号 | `minioadmin` / `minioadmin` |
+| Docker 网络 | Milvus 与 MinIO 同在 `milvus` 网络（容器内可用容器名互访） |
+
+配置里有两段：`milvus.storage`（备份时=源实例存储，恢复时=**目标实例**存储）与 `backup.storage`（备份文件写在哪）。
+两段不同就是官方的**跨存储**用法。
+
+> 先在 MinIO 控制台建好备份用桶（如 `milvus-backup`），再执行备份；`a-bucket` 是 Milvus 自己的数据桶，不要往里写备份。
+
+### 4.4 备份（源实例）
+
+```powershell
+docker run --rm --network milvus -v <配置目录>:/app/configs zilliz/milvus-backup:latest `
+  create -n campus_repair_20260916 --filter campus_repair_knowledge
+#   老版本用 -c 指定集合：create -n campus_repair_20260916 -c campus_repair_knowledge
+#   不带集合参数就是整实例（会把 book_semantic_db 等其它项目的集合一起备份）
+#   按库/集合过滤：--filter campus_repair_knowledge   或  --filter 'db1.*'
+docker run --rm --network milvus -v <配置目录>:/app/configs zilliz/milvus-backup:latest list
+```
+
+### 4.5 恢复 / 导入（这才是「导入到另一个实例」的步骤）
+
+**① 恢复到本实例、同名集合**（覆盖式，原集合数据会被替换）
+```powershell
+... restore -n campus_repair_20260916 --filter campus_repair_knowledge
+#   老版本：... restore -n campus_repair_20260916 -c campus_repair_knowledge
+```
+
+**② 恢复成新集合名**（推荐：不动现有集合，先验证）
+```powershell
+# 加后缀：集合名变成 campus_repair_knowledge_recover
+... restore -n campus_repair_20260916 -s _recover --filter campus_repair_knowledge_recover
+
+# 或重命名：把库1的 coll1 恢复成 库2的 coll1
+... restore -n campus_repair_20260916 -r campus_repair_knowledge:cr_knowledge_new --filter cr_knowledge_new
+```
+
+**③ 恢复到另一个 Milvus 实例**（跨实例 + 跨存储）
+1. 把配置里的 `milvus.address/port` 改成**目标实例**的地址；
+2. `milvus.storage` 改成**目标实例自己的对象存储**（必须与那台 Milvus 的配置一致，否则恢复的数据它读不到）；
+3. `backup.storage` 保持指向**备份文件所在存储**（源实例的 MinIO；跨机器时确保目标端能访问，比如同一个 MinIO 或 S3）；
+4. 如果目标实例的 REST 端口不是 19530，在 `milvus` 段里显式指定 REST 地址；
+5. 执行 `restore`，建议先加 `-s _new` 换个集合名，确认无误后再考虑覆盖。
+> 记忆口诀：**`milvus.*` 管"往哪台 Milvus 写"，`backup.*` 管"备份文件在哪读"。**
+
+### 4.6 恢复后怎么验证
+
+```powershell
+# 目标实例：REST 查实体数（19530 上的 REST v2）
+curl -X POST http://<目标>:19530/v2/vectordb/entities/query -H "Content-Type: application/json" `
+  -d '{"collectionName":"campus_repair_knowledge","filter":"","outputFields":["count(*)"]}'
+# 应用侧：确认同步状态与检索效果
+#   GET /api/v1/admin/rag/vector-status
+#   GET /api/v1/admin/rag/search-debug?query=宿舍水房一直渗水
+```
+
+### 4.7 什么时候该用 milvus-backup
+
+本项目只有 191 条实体、1 个集合，**方式 A/B 更快更简单**；milvus-backup 的价值在于：
+整实例一致性快照、多集合批量、大数据量、以及"恢复到同版本或更新版本"的官方兼容性保证。
 
 ## 5. 方式 D：整实例搬迁（版本必须一致）
 
