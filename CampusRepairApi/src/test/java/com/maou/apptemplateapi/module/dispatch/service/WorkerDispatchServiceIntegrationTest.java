@@ -13,7 +13,9 @@ import com.maou.apptemplateapi.module.ai.mapper.RepairAiAnalysisMapper;
 import com.maou.apptemplateapi.module.dispatch.dto.DispatchCandidateResponse;
 import com.maou.apptemplateapi.module.dispatch.dto.DispatchSuggestionResponse;
 import com.maou.apptemplateapi.module.dispatch.entity.WorkerDispatchScoreSnapshot;
+import com.maou.apptemplateapi.module.dispatch.entity.WorkerProfile;
 import com.maou.apptemplateapi.module.dispatch.mapper.WorkerDispatchScoreSnapshotMapper;
+import com.maou.apptemplateapi.module.dispatch.mapper.WorkerProfileMapper;
 import com.maou.apptemplateapi.module.ticket.entity.RepairTicket;
 import com.maou.apptemplateapi.module.ticket.mapper.RepairTicketMapper;
 import org.junit.jupiter.api.Test;
@@ -60,6 +62,9 @@ class WorkerDispatchServiceIntegrationTest {
 
     @Autowired
     private WorkerDispatchScoreSnapshotMapper snapshotMapper;
+
+    @Autowired
+    private WorkerProfileMapper workerProfileMapper;
 
     @Autowired
     private AiTaskRecordMapper aiTaskRecordMapper;
@@ -122,6 +127,23 @@ class WorkerDispatchServiceIntegrationTest {
         assertThat(suggestion.candidates().get(0).workerId()).isEqualTo(10002L);
         assertThat(suggestion.candidates().get(0).totalScore()).isEqualByComparingTo(BigDecimal.valueOf(66.50));
         assertThat(suggestion.recommendedWorkerId()).isEqualTo(10002L);
+    }
+
+    @Test
+    void shouldExcludeWorkerAfterDispatchDisabledEvenWhenSnapshotExists() throws Exception {
+        insertWaterLeakTicket(TICKET_ID);
+        Long analysisId = insertAnalysis(TICKET_ID, "SUCCESS", 10002L, BigDecimal.valueOf(0.7));
+        insertSnapshot(analysisId, 10002L, BigDecimal.valueOf(66.50), 1);
+
+        disableDispatch(10002L);
+
+        DispatchSuggestionResponse suggestion = fetchSuggestion(TICKET_ID);
+
+        assertThat(suggestion.candidates())
+                .isNotEmpty()
+                .extracting(DispatchCandidateResponse::workerId)
+                .doesNotContain(10002L);
+        assertThat(suggestion.recommendedWorkerId()).isNotEqualTo(10002L);
     }
 
     @Test
@@ -237,6 +259,24 @@ class WorkerDispatchServiceIntegrationTest {
         snapshot.setRuleReason("技能匹配40，部门未命中，当前活跃工单0/3");
         snapshot.setAiRecommended(aiRecommended);
         snapshotMapper.insert(snapshot);
+    }
+
+    private void disableDispatch(Long workerId) {
+        WorkerProfile profile = workerProfileMapper.selectOne(new LambdaQueryWrapper<WorkerProfile>()
+                .eq(WorkerProfile::getWorkerId, workerId));
+        if (profile == null) {
+            profile = new WorkerProfile();
+            profile.setWorkerId(workerId);
+            profile.setDepartmentName("网络组");
+            profile.setSkillTags("[\"网络\"]");
+            profile.setMaxActiveOrders(3);
+            profile.setDispatchEnabled(0);
+            profile.setDeleted(0);
+            workerProfileMapper.insert(profile);
+            return;
+        }
+        profile.setDispatchEnabled(0);
+        workerProfileMapper.updateById(profile);
     }
 
     private String adminToken() {

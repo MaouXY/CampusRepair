@@ -87,7 +87,17 @@ public class WorkerDispatchService {
                     ticketId, analysis.getId());
             return plan.candidates();
         }
-        return snapshotCandidates;
+        List<DispatchCandidateResponse> available = scoringService.filterDispatchAvailable(snapshotCandidates);
+        if (available.size() != snapshotCandidates.size()) {
+            log.warn("dispatch snapshot candidates filtered by current worker profile, scenario=admin-dispatch-suggestion, ticketId={}, aiAnalysisId={}, before={}, after={}",
+                    ticketId, analysis.getId(), snapshotCandidates.size(), available.size());
+        }
+        if (available.isEmpty()) {
+            log.warn("dispatch snapshot candidates all unavailable, scenario=admin-dispatch-suggestion, ticketId={}, aiAnalysisId={}, fallback=rule-scoring",
+                    ticketId, analysis.getId());
+            return plan.candidates();
+        }
+        return available;
     }
 
     private Long resolveRecommendedWorkerId(RepairAiAnalysis analysis,

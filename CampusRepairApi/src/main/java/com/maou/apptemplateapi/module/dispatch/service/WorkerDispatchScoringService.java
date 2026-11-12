@@ -139,6 +139,36 @@ public class WorkerDispatchScoringService {
                 .toList();
     }
 
+    /**
+     * 过滤掉当前已不参与派单的维修员（账号停用/画像 dispatch_enabled=0）。
+     * 历史快照记录的是分析时刻的画像，管理员事后关闭派单时仍需以当前画像为准。
+     */
+    public List<DispatchCandidateResponse> filterDispatchAvailable(List<DispatchCandidateResponse> candidates) {
+        if (candidates.isEmpty()) {
+            return candidates;
+        }
+        Set<Long> enabledAccountIds = userAccountMapper.selectList(new LambdaQueryWrapper<UserAccount>()
+                        .eq(UserAccount::getRoleCode, UserRole.WORKER.name())
+                        .eq(UserAccount::getEnabled, 1)
+                        .eq(UserAccount::getDeleted, 0))
+                .stream()
+                .map(UserAccount::getId)
+                .collect(Collectors.toSet());
+        Map<Long, WorkerProfile> profiles = workerProfileMapper.selectList(new LambdaQueryWrapper<WorkerProfile>()
+                        .eq(WorkerProfile::getDeleted, 0))
+                .stream()
+                .collect(Collectors.toMap(WorkerProfile::getWorkerId, Function.identity(), (left, right) -> left));
+        return candidates.stream()
+                .filter(candidate -> {
+                    if (!enabledAccountIds.contains(candidate.workerId())) {
+                        return false;
+                    }
+                    WorkerProfile profile = profiles.get(candidate.workerId());
+                    return profile == null || profile.getDispatchEnabled() == null || profile.getDispatchEnabled() == 1;
+                })
+                .toList();
+    }
+
     public List<DispatchCandidateResponse> markRecommended(List<DispatchCandidateResponse> candidates, Long recommendedWorkerId) {
         if (candidates.isEmpty()) {
             return candidates;
